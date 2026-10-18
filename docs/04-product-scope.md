@@ -56,11 +56,16 @@ Build the **one editor that collapses two apps most people split**: the fast, si
 
 ## Open decisions for Vernon
 
-1. **Editing core — build vs reuse.** Options: (a) a web-native code editor in the web-view (CodeMirror 6 / Monaco) — fast to build, but Monaco is heavy and web-editors struggle with multi-GB files, which is one of our differentiators; (b) a Rust text engine (rope buffer, e.g. the `ropey` crate + a custom/virtualised renderer) exposed to the UI — best for huge-file performance, much more work; (c) reuse **Scintilla** (as NotepadNext does) — mature, but C++ and awkward inside Tauri. _My lean: (b) for the buffer/large-file path, with a web-view render surface — but this is the call that most shapes the project._
+1. **Editing core — DECIDED 2026-10-18: Option B, the Rust rope engine** (`ropey` in `app/src-tauri`, web-view renders the viewport, tree-sitter highlighting). Chosen over the faster web-editor path because this is a first OSS project meant to be built properly and because the rope is what makes the large-file differentiator real. See `docs/decisions/0002-editing-core-options.md`, including the Xi-editor failure analysis and the guardrails against repeating it.
 2. **Build vs fork NotepadNext.** Adopt-and-resource it (Qt/C++, cross-platform, Scintilla, but single-maintainer/unstable) vs greenfield in Tauri. _My lean: greenfield — NotepadNext validates the concept but its stack (Qt/C++) and state don't give us the modern UI or the Markdown layer cheaply._
 3. **Name & brand.** Not "Notepad++" (GPL + brand), not "NotepadNext" (taken). Needs its own identity before any public release. (Can park until there's something to show.)
 4. **Licence.** Recommend permissive **MIT OR Apache-2.0 dual** (matches the Rust ecosystem norm, and notably what PhotoCraft/WordCraft use) rather than GPL — lowers the barrier to "used by many" and to any future DataTorque involvement. Your call, and it's easier to pick now than to relicense later.
-5. **Is this a personal project or a potential DataTorque product?** Affects licence, repo home (currently local at `C:\Users\vernonk\dev\notepad-refresh`, outside OneDrive so build output doesn't thrash sync), and whether it ever goes on GHE.
+5. **Personal vs DataTorque product — DECIDED 2026-10-18: personal.** Vernon's own project. Structural consequences, set from the outset:
+   - **Not DataTorque IP and not on GHE.** Any remote lives on Vernon's *personal* GitHub, never `datatorque.ghe.com`. Keep DataTorque code, brand and internal practices out of it (we borrow dt-platform's generic engineering *discipline*, not its code or config).
+   - **Repo home:** local at `C:\Users\vernonk\dev\notepad-refresh` (outside OneDrive so build output doesn't thrash sync). Not under `workspace/` (that's DataTorque's AI-OS tree) and not in a synced personal drive (build output).
+   - **Commit identity:** must be Vernon's *personal* identity, not `vernon.kay@datatorque.com`. The first commit (e18d7f7) used the DT email by default — to be corrected once Vernon gives a personal name/email.
+   - **Not tracked in the DataTorque system (Ren/desk).** This is personal; it does not belong in the work decision queue or reading list.
+   - **Licence:** Vernon's free choice as author. Recommend permissive **MIT OR Apache-2.0 dual** (Rust-ecosystem norm, best for "used by many"; also what PhotoCraft/WordCraft use). Pending confirmation before LICENSE files are added.
 
 ## MVP (first vertical slice to prove the thesis)
 
