@@ -904,6 +904,40 @@ pub fn replace_all(
     Ok(ReplaceResult { meta, count })
 }
 
+/// The current byte length of a file on disk, for follow/tail to detect growth cheaply.
+#[tauri::command]
+pub fn file_len(path: String) -> Result<u64, EditorError> {
+    Ok(std::fs::metadata(&path)?.len())
+}
+
+/// Re-open the active tab's file from disk, replacing its buffer (used by follow/tail
+/// when the file has grown). Re-selects the engine by current size, so a log that
+/// crosses the large-file threshold keeps working. Discards unsaved edits by design
+/// — follow is for watching a changing file, not editing it.
+#[tauri::command]
+pub fn reload(dark: bool, state: State<EditorState>) -> Result<DocumentMeta, EditorError> {
+    let mut reg = state.0.lock().map_err(|_| EditorError::LockPoisoned)?;
+    let id = reg.active.ok_or(EditorError::NoActiveDocument)?;
+    let path = reg
+        .tabs
+        .iter()
+        .find(|t| t.id == id)
+        .and_then(|t| t.path.clone())
+        .ok_or(EditorError::NoPath)?;
+    let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+    let mut buffer: Box<dyn Buffer> = if size >= mmapbuf::MMAP_THRESHOLD_BYTES {
+        Box::new(mmapbuf::MmapBuffer::default())
+    } else {
+        Box::new(RopeBuffer { dark, ..Default::default() })
+    };
+    buffer.open(&path)?;
+    let meta = buffer.meta();
+    if let Some(t) = reg.tabs.iter_mut().find(|t| t.id == id) {
+        t.buffer = buffer;
+    }
+    Ok(meta)
+}
+
 /// Lines matching a regex, for the live filter-to-view (works on both engines, so a
 /// huge log can be filtered too). Capped at `MAX_FILTER_MATCHES`.
 #[tauri::command]

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { readText, writeText } from "@tauri-apps/plugin-clipboard-manager";
@@ -264,6 +264,20 @@ function App() {
   const [filterOpen, setFilterOpen] = useState(false);
   const [filterQuery, setFilterQuery] = useState("");
   const [filterMatches, setFilterMatches] = useState<FilterMatch[]>([]);
+  const [followOn, setFollowOn] = useState(false);
+  const [hlEditorOpen, setHlEditorOpen] = useState(false);
+  const [highlighters, setHighlighters] = useState<{ pattern: string; color: string }[]>(() => {
+    try {
+      const raw = localStorage.getItem("tuhi.highlighters");
+      if (raw) return JSON.parse(raw);
+    } catch {
+      /* fall through to defaults */
+    }
+    return [
+      { pattern: "error|fatal|panic", color: "#ff5a36" },
+      { pattern: "warn", color: "#ffb81d" },
+    ];
+  });
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [paletteQuery, setPaletteQuery] = useState("");
   const [paletteIndex, setPaletteIndex] = useState(0);
@@ -725,6 +739,78 @@ function App() {
     scrollerRef.current?.focus();
   }, []);
 
+  // Highlighters: persist the rules, compile them once, expose a per-line matcher.
+  useEffect(() => {
+    try {
+      localStorage.setItem("tuhi.highlighters", JSON.stringify(highlighters));
+    } catch {
+      /* best-effort */
+    }
+  }, [highlighters]);
+
+  const compiledHl = useMemo(
+    () =>
+      highlighters
+        .map((h) => {
+          try {
+            return { re: new RegExp(h.pattern, "i"), color: h.color };
+          } catch {
+            return null; // skip an invalid pattern rather than throw
+          }
+        })
+        .filter((x): x is { re: RegExp; color: string } => x !== null),
+    [highlighters],
+  );
+
+  const lineHighlight = useCallback(
+    (text: string): string | undefined => {
+      for (const h of compiledHl) if (h.re.test(text)) return h.color;
+      return undefined;
+    },
+    [compiledHl],
+  );
+
+  // Follow / tail: while on, poll the file size and reload + scroll to the bottom when
+  // it grows (tail -f). Works for both engines; the large-file engine re-mmaps.
+  const followLenRef = useRef<number>(-1);
+  useEffect(() => {
+    if (!followOn || !meta?.path) return;
+    const path = meta.path;
+    const dark = window.matchMedia("(prefers-color-scheme: dark)").matches;
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        const len = await invoke<number>("file_len", { path });
+        if (cancelled || len === followLenRef.current) return;
+        followLenRef.current = len;
+        const m = await invoke<DocumentMeta>("reload", { dark });
+        if (cancelled) return;
+        setMeta(m);
+        requestAnimationFrame(() => {
+          const el = scrollerRef.current;
+          if (el) el.scrollTop = el.scrollHeight;
+        });
+      } catch {
+        /* file vanished or unreadable; keep polling */
+      }
+    };
+    void tick(); // once immediately on enable
+    const id = window.setInterval(() => void tick(), 1000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [followOn, meta?.path]);
+
+  const toggleFollow = useCallback(() => {
+    if (!meta?.path) return;
+    setFollowOn((v) => {
+      if (!v) followLenRef.current = -1; // force a reload + scroll on enable
+      return !v;
+    });
+  }, [meta?.path]);
+
   // --- Editing. Every op goes through the char-indexed Rust buffer. ---
 
   const insertText = useCallback(
@@ -1185,6 +1271,8 @@ function App() {
       ...(meta && !readonly ? [{ label: "Find in file…", hint: combo("F"), kind: C, run: () => openFind(false) }] : []),
       ...(meta && !readonly ? [{ label: "Format JSON (pretty-print)", kind: C, run: () => void formatJson() }] : []),
       ...(meta ? [{ label: "Filter lines to view…", kind: C, run: () => openFilter() }] : []),
+      ...(meta?.path ? [{ label: followOn ? "Stop following file" : "Follow file (tail)", kind: C, run: () => toggleFollow() }] : []),
+      { label: "Edit highlighters…", kind: C, run: () => setHlEditorOpen(true) },
       { label: "Toggle file tree", kind: C, run: () => setTreeOpen((v) => !v) },
       { label: "Toggle outline", kind: C, run: () => setOutlineOpen((v) => !v) },
       ...tabs.map((t) => ({ label: t.name, kind: "tab" as const, run: () => void switchTab(t.id) })),
@@ -1377,8 +1465,13 @@ function App() {
               ))}
               {lines.map((ln, i) => {
                 const lineIndex = rangeStart + i;
+                const hl = lineHighlight(ln.text);
                 return (
-                  <div className="line" key={lineIndex}>
+                  <div
+                    className="line"
+                    key={lineIndex}
+                    style={hl ? { boxShadow: `inset 3px 0 0 ${hl}`, background: `${hl}14` } : undefined}
+                  >
                     <span className="gutter">{lineIndex + 1}</span>
                     <span
                       className="text"
@@ -1461,23 +1554,27 @@ function App() {
           </div>
           <div className="filter-list">
             {filterMatches.length ? (
-              filterMatches.map((m) => (
-                <div
-                  key={m.line}
-                  className="filter-row"
-                  onClick={() => {
-                    closeFilter();
-                    void jumpToLine(m.line);
-                  }}
-                  title={`Go to line ${m.line + 1}`}
-                >
-                  <span className="filter-gutter">{m.line + 1}</span>
-                  <span className="filter-text">
-                    {renderLine(m.text.replace(/\r?\n$/, ""), [])}
-                    {m.truncated && <span className="trunc"> ⋯</span>}
-                  </span>
-                </div>
-              ))
+              filterMatches.map((m) => {
+                const hl = lineHighlight(m.text);
+                return (
+                  <div
+                    key={m.line}
+                    className="filter-row"
+                    style={hl ? { boxShadow: `inset 3px 0 0 ${hl}`, background: `${hl}14` } : undefined}
+                    onClick={() => {
+                      closeFilter();
+                      void jumpToLine(m.line);
+                    }}
+                    title={`Go to line ${m.line + 1}`}
+                  >
+                    <span className="filter-gutter">{m.line + 1}</span>
+                    <span className="filter-text">
+                      {renderLine(m.text.replace(/\r?\n$/, ""), [])}
+                      {m.truncated && <span className="trunc"> ⋯</span>}
+                    </span>
+                  </div>
+                );
+              })
             ) : (
               <div className="filter-empty">
                 {filterQuery
@@ -1494,6 +1591,20 @@ function App() {
         <span className="path">{meta?.path ?? "No file"}</span>
         {readonly && <span className="badge-ro">read-only · large file</span>}
         <span className="spacer" />
+        {meta?.path && (
+          <button
+            className={`sb-btn${followOn ? " on" : ""}`}
+            onClick={toggleFollow}
+            title="Follow the file as it grows (tail -f)"
+          >
+            {followOn ? "● Following" : "Follow"}
+          </button>
+        )}
+        {meta && (
+          <button className="sb-btn" onClick={() => setHlEditorOpen(true)} title="Highlighter rules">
+            Highlighters
+          </button>
+        )}
         {caret && <span className="pos">Ln {caret.line + 1}, Col {caret.col + 1}</span>}
         {meta && (
           <span className="counts">
@@ -1557,6 +1668,62 @@ function App() {
               )}
             </div>
             <div className="palette-foot">↑↓ move · Enter run · Esc close</div>
+          </div>
+        </div>
+      )}
+      {hlEditorOpen && (
+        <div className="palette-overlay" onMouseDown={() => setHlEditorOpen(false)}>
+          <div className="palette-modal hl-modal" onMouseDown={(e) => e.stopPropagation()}>
+            <div className="hl-head">Highlighter rules</div>
+            <div className="hl-body">
+              {highlighters.length ? (
+                highlighters.map((h, i) => (
+                  <div className="hl-row" key={i}>
+                    <input
+                      className="hl-pattern"
+                      value={h.pattern}
+                      placeholder="regex, e.g. ERROR|fatal"
+                      onChange={(e) =>
+                        setHighlighters((rs) =>
+                          rs.map((r, j) => (j === i ? { ...r, pattern: e.target.value } : r)),
+                        )
+                      }
+                    />
+                    <input
+                      className="hl-color"
+                      type="color"
+                      value={h.color}
+                      onChange={(e) =>
+                        setHighlighters((rs) =>
+                          rs.map((r, j) => (j === i ? { ...r, color: e.target.value } : r)),
+                        )
+                      }
+                    />
+                    <button
+                      className="hl-del"
+                      title="Remove rule"
+                      onClick={() => setHighlighters((rs) => rs.filter((_, j) => j !== i))}
+                    >
+                      ×
+                    </button>
+                  </div>
+                ))
+              ) : (
+                <p className="hl-empty">No rules yet — add one to tint matching lines.</p>
+              )}
+            </div>
+            <div className="hl-foot">
+              <button
+                className="find-btn"
+                onClick={() => setHighlighters((rs) => [...rs, { pattern: "", color: "#ff5a36" }])}
+              >
+                + Add rule
+              </button>
+              <span className="spacer" />
+              <button className="find-btn" onClick={() => setHlEditorOpen(false)}>
+                Done
+              </button>
+            </div>
           </div>
         </div>
       )}

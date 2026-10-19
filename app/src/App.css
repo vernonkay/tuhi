@@ -526,6 +526,59 @@ html, body, #root {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.sb-btn {
+  font: inherit;
+  font-size: 11px;
+  padding: 1px 8px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: transparent;
+  color: var(--slate);
+  cursor: pointer;
+}
+.sb-btn:hover { border-color: var(--coral); color: var(--coral); }
+.sb-btn.on { background: var(--coral); color: #fff; border-color: var(--coral); }
+
+/* Highlighter rules editor */
+.hl-modal { width: min(460px, 92vw); }
+.hl-head {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--slate);
+  padding: 12px 14px 8px;
+  border-bottom: 1px solid var(--border);
+}
+.hl-body { padding: 8px 10px; overflow: auto; max-height: 50vh; }
+.hl-empty { color: var(--slate); font-size: 13px; padding: 10px; }
+.hl-row { display: flex; align-items: center; gap: 8px; padding: 4px 4px; }
+.hl-pattern {
+  flex: 1;
+  min-width: 0;
+  font: inherit;
+  font-size: 13px;
+  font-family: var(--mono-font);
+  padding: 5px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--paper);
+  color: var(--ink);
+}
+.hl-pattern:focus { outline: none; border-color: var(--coral); }
+.hl-color { width: 34px; height: 28px; border: 1px solid var(--border); border-radius: 6px; background: none; cursor: pointer; padding: 0; }
+.hl-del {
+  border: none;
+  background: transparent;
+  color: var(--slate);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 6px;
+  border-radius: 4px;
+}
+.hl-del:hover { background: var(--coral-soft); color: var(--coral); }
+.hl-foot { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-top: 1px solid var(--border); }
 
 @media (prefers-color-scheme: dark) {
   :root {
