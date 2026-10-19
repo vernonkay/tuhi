@@ -168,16 +168,6 @@ function IconSearch() {
     </svg>
   );
 }
-function IconSettings() {
-  return (
-    <svg {...iconProps}>
-      <path d="M4 6h8M16 6h4M4 12h4M10 12h10M4 18h10M18 18h2" />
-      <circle cx="14" cy="6" r="2" />
-      <circle cx="8" cy="12" r="2" />
-      <circle cx="14" cy="18" r="2" />
-    </svg>
-  );
-}
 function IconTree() {
   return (
     <svg {...iconProps}>
@@ -519,13 +509,19 @@ function App() {
 
   const handleOpen = useCallback(async () => {
     setError(null);
-    const selected = await openDialog({ multiple: false, directory: false });
-    if (typeof selected !== "string") return;
+    const selected = await openDialog({ multiple: true, directory: false });
+    const paths = Array.isArray(selected) ? selected : typeof selected === "string" ? [selected] : [];
+    if (!paths.length) return;
     setBusy(true);
     try {
       const dark = window.matchMedia("(prefers-color-scheme: dark)").matches;
-      await applyTabsState(await invoke<TabsState>("open_document", { path: selected, dark }));
-      void revealInTree(selected);
+      // Open each file as its own tab; the last one ends up active.
+      let last: TabsState | null = null;
+      for (const p of paths) {
+        last = await invoke<TabsState>("open_document", { path: p, dark });
+      }
+      if (last) await applyTabsState(last);
+      void revealInTree(paths[paths.length - 1]);
     } catch (e) {
       setError(String(e));
     } finally {
@@ -1107,15 +1103,16 @@ function App() {
         <button className={`rail-btn${outlineOpen ? " on" : ""}`} onClick={() => setOutlineOpen((v) => !v)} title="Outline">
           <IconList />
         </button>
-        <button className="rail-btn" onClick={() => openFind(false)} disabled={!meta || readonly} title="Find (Ctrl+F)">
+        <button
+          className={`rail-btn${findOpen ? " on" : ""}`}
+          onClick={() => (findOpen ? closeFind() : openFind(false))}
+          disabled={!meta || readonly}
+          title="Find (Ctrl+F)"
+        >
           <IconSearch />
         </button>
         <button className="rail-btn" onClick={openPalette} title="Command palette (Ctrl+P)">
           <IconCommand />
-        </button>
-        <span className="rail-spacer" />
-        <button className="rail-btn" disabled title="Settings — coming soon">
-          <IconSettings />
         </button>
       </nav>
       {treeOpen && (
