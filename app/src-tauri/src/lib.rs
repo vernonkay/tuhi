@@ -10,7 +10,11 @@ fn greet(name: &str) -> String {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_clipboard_manager::init())
         .manage(editor::EditorState::default())
+        // No native menu bar: Studio leads with the rail + command palette (Ctrl+P),
+        // and all actions have front-end keyboard shortcuts (see App.tsx).
         .invoke_handler(tauri::generate_handler![
             greet,
             editor::open_document,
@@ -18,6 +22,18 @@ pub fn run() {
             editor::insert_text,
             editor::delete_range,
             editor::save_document,
+            editor::pos_to_char,
+            editor::char_to_pos,
+            editor::read_range,
+            editor::search,
+            editor::replace_all,
+            editor::list_tabs,
+            editor::switch_tab,
+            editor::close_tab,
+            editor::refresh_highlights,
+            editor::list_dir,
+            editor::get_outline,
+            editor::home_dir,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

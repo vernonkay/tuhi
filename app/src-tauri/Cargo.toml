@@ -1,5 +1,5 @@
 [package]
-name = "app"
+name = "tuhi"
 version = "0.1.0"
 description = "A fast, cross-platform, open-source text & Markdown editor"
 authors = ["Vernon Kay"]
@@ -12,7 +12,7 @@ edition = "2024"
 # The `_lib` suffix may seem redundant but it is necessary
 # to make the lib name unique and wouldn't conflict with the bin name.
 # This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
-name = "app_lib"
+name = "tuhi_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
@@ -21,9 +21,16 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-clipboard-manager = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 ropey = "1"
+syntect = { version = "5", default-features = false, features = ["default-fancy"] }
+two-face = "0.4"
+regex = "1"
+memmap2 = "0.9"
+memchr = "2"
 
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration
