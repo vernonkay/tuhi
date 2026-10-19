@@ -218,6 +218,21 @@ html, body, #root {
 .pl-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pl-hint { font-size: 11px; color: var(--slate); flex: 0 0 auto; }
 .palette-empty { padding: 16px; color: var(--slate); text-align: center; font-size: 13px; }
+.palette-section {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--slate);
+  padding: 10px 12px 4px;
+}
+.palette-foot {
+  border-top: 1px solid var(--border);
+  padding: 7px 14px;
+  font-size: 11px;
+  color: var(--slate);
+  font-variant-numeric: tabular-nums;
+}
 
 /* Top bar: brand corner (top-left) + tab strip */
 .topbar {

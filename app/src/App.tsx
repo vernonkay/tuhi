@@ -56,8 +56,8 @@ interface OutlineItem {
   line: number;
 }
 
-/** A command-palette entry: a label, an optional hint, and what it does. */
-type PaletteItem = { label: string; hint?: string; run: () => void };
+/** A command-palette entry: a label, an optional hint, its group, and its action. */
+type PaletteItem = { label: string; hint?: string; kind: "command" | "tab" | "file"; run: () => void };
 
 /** The directory part of a path (handles both `/` and `\`). */
 function dirOf(p: string): string {
@@ -123,6 +123,11 @@ interface Caret extends CaretPos {
 const LINE_HEIGHT = 20; // must match `.line` height in App.css
 const OVERSCAN = 12;
 const GUTTER = 76; // `.gutter` width (64) + padding-right (12)
+
+/** Platform-appropriate shortcut label: "⌘O" on macOS, "Ctrl+O" elsewhere. */
+const IS_MAC =
+  typeof navigator !== "undefined" && /Mac|iPhone|iPad|iPod/.test(navigator.platform || navigator.userAgent || "");
+const combo = (key: string) => (IS_MAC ? `⌘${key}` : `Ctrl+${key}`);
 
 /** The caret-over-a-line brand mark (docs/brand.md). Coral caret, ink line. */
 function Mark({ size = 18 }: { size?: number }) {
@@ -293,15 +298,18 @@ function App() {
           return null;
         }
       };
-      let saved: string | null = null;
+      // Only reopen a folder the user *explicitly* pinned via Open Folder. A loose
+      // file's directory is never remembered, so a fresh start always lands on home.
+      let root: string | null = null;
       let pinned = false;
       try {
-        saved = localStorage.getItem("tuhi.folderRoot");
-        pinned = localStorage.getItem("tuhi.folderPinned") === "1";
+        if (localStorage.getItem("tuhi.folderPinned") === "1") {
+          root = localStorage.getItem("tuhi.folderRoot");
+          pinned = true;
+        }
       } catch {
         /* no persisted location */
       }
-      let root = saved;
       let kids = root ? await list(root) : null;
       if (!kids) {
         pinned = false;
@@ -323,11 +331,17 @@ function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Remember the current folder root so the next launch reopens it.
+  // Remember only an explicitly pinned folder (Open Folder) for next launch; a
+  // loose file's directory is deliberately not persisted, so startup stays on home.
   useEffect(() => {
     try {
-      if (folderRoot) localStorage.setItem("tuhi.folderRoot", folderRoot);
-      localStorage.setItem("tuhi.folderPinned", folderPinned ? "1" : "0");
+      if (folderPinned && folderRoot) {
+        localStorage.setItem("tuhi.folderRoot", folderRoot);
+        localStorage.setItem("tuhi.folderPinned", "1");
+      } else {
+        localStorage.removeItem("tuhi.folderRoot");
+        localStorage.removeItem("tuhi.folderPinned");
+      }
     } catch {
       /* persistence is best-effort */
     }
@@ -1017,18 +1031,19 @@ function App() {
 
   const paletteFiltered: PaletteItem[] = [];
   if (paletteOpen) {
+    const C = "command" as const;
     const items: PaletteItem[] = [
-      { label: "Open File…", hint: "Ctrl+O", run: () => void handleOpen() },
-      { label: "Open Folder…", run: () => void openFolder() },
-      ...(meta ? [{ label: "Save", hint: "Ctrl+S", run: () => void handleSave() }] : []),
-      ...(meta && !readonly ? [{ label: "Find…", hint: "Ctrl+F", run: () => openFind(false) }] : []),
-      { label: "Toggle File Tree", run: () => setTreeOpen((v) => !v) },
-      { label: "Toggle Outline", run: () => setOutlineOpen((v) => !v) },
-      ...tabs.map((t) => ({ label: t.name, hint: "tab", run: () => void switchTab(t.id) })),
+      { label: "Open File…", hint: combo("O"), kind: C, run: () => void handleOpen() },
+      { label: "Open Folder…", kind: C, run: () => void openFolder() },
+      ...(meta ? [{ label: "Save", hint: combo("S"), kind: C, run: () => void handleSave() }] : []),
+      ...(meta && !readonly ? [{ label: "Find in file…", hint: combo("F"), kind: C, run: () => openFind(false) }] : []),
+      { label: "Toggle file tree", kind: C, run: () => setTreeOpen((v) => !v) },
+      { label: "Toggle outline", kind: C, run: () => setOutlineOpen((v) => !v) },
+      ...tabs.map((t) => ({ label: t.name, kind: "tab" as const, run: () => void switchTab(t.id) })),
       ...Object.values(dirCache)
         .flat()
         .filter((e) => !e.is_dir)
-        .map((e) => ({ label: e.name, hint: "file", run: () => void openPath(e.path) })),
+        .map((e) => ({ label: e.name, kind: "file" as const, run: () => void openPath(e.path) })),
     ];
     const q = paletteQuery.trim().toLowerCase();
     const matched = q ? items.filter((it) => it.label.toLowerCase().includes(q)) : items;
@@ -1111,7 +1126,7 @@ function App() {
         >
           <IconSearch />
         </button>
-        <button className="rail-btn" onClick={openPalette} title="Command palette (Ctrl+P)">
+        <button className="rail-btn" onClick={openPalette} title={`Command palette (${combo("P")})`}>
           <IconCommand />
         </button>
       </nav>
@@ -1294,7 +1309,7 @@ function App() {
             <input
               className="palette-input"
               autoFocus
-              placeholder="Go to file, or run a command…"
+              placeholder="Search a file to open, or run a command (try 'Open Folder' or 'Save')"
               value={paletteQuery}
               onChange={(e) => {
                 setPaletteQuery(e.target.value);
@@ -1304,25 +1319,39 @@ function App() {
             />
             <div className="palette-list">
               {paletteFiltered.length ? (
-                paletteFiltered.map((it, i) => (
-                  <div
-                    key={`${it.label}-${i}`}
-                    className={`palette-item${i === paletteIndex ? " on" : ""}`}
-                    onMouseEnter={() => setPaletteIndex(i)}
-                    onMouseDown={(e) => {
-                      e.preventDefault();
-                      it.run();
-                      setPaletteOpen(false);
-                    }}
-                  >
-                    <span className="pl-label">{it.label}</span>
-                    {it.hint && <span className="pl-hint">{it.hint}</span>}
-                  </div>
-                ))
+                paletteFiltered.map((it, i) => {
+                  const prev = paletteFiltered[i - 1];
+                  const header =
+                    !prev || prev.kind !== it.kind
+                      ? it.kind === "command"
+                        ? "Commands"
+                        : it.kind === "tab"
+                          ? "Open tabs"
+                          : "Files in this folder"
+                      : null;
+                  return (
+                    <div key={`${it.kind}-${it.label}-${i}`}>
+                      {header && <div className="palette-section">{header}</div>}
+                      <div
+                        className={`palette-item${i === paletteIndex ? " on" : ""}`}
+                        onMouseEnter={() => setPaletteIndex(i)}
+                        onMouseDown={(e) => {
+                          e.preventDefault();
+                          it.run();
+                          setPaletteOpen(false);
+                        }}
+                      >
+                        <span className="pl-label">{it.label}</span>
+                        {it.hint && <span className="pl-hint">{it.hint}</span>}
+                      </div>
+                    </div>
+                  );
+                })
               ) : (
-                <div className="palette-empty">No matches</div>
+                <div className="palette-empty">No files or commands match</div>
               )}
             </div>
+            <div className="palette-foot">↑↓ move · Enter run · Esc close</div>
           </div>
         </div>
       )}
