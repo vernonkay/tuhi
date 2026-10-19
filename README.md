@@ -1,59 +1,80 @@
-# tuhi — a fast, cross-platform text & Markdown editor
+# tuhi
 
-A modern, fast, **cross-platform**, open-source text/code editor that also treats **Markdown** as a first-class citizen, the loved parts of Notepad++ rebuilt portable and modern, without becoming an IDE or a knowledge-base.
+**A fast, cross-platform text & Markdown editor that opens multi-GB files.** Built in
+Rust + Tauri: small native binaries, no Electron weight, and the loved parts of
+Notepad++ rebuilt portable and modern, without becoming an IDE or a knowledge-base.
 
-> **tuhi** is te reo Māori for *to write, to inscribe, to record.* The one small known collision is an inactive GNOME tablet utility of the same name (not an editor).
+> **tuhi** is te reo Māori for *to write, to inscribe, to record*.
 
-Vernon Kay's first open-source project. Personal, developed independently; its public home is a personal GitHub account.
+## Highlights
 
-## Why this exists (the thesis)
+- **Huge files, no cliff.** Open and scroll multi-GB logs and data dumps with flat
+  memory. Files 25 MB and up use a read-only memory-mapped engine; nothing has to load
+  the whole file into the view.
+- **Live filter-to-view.** Type a regex and the document collapses to just the matching
+  lines, instantly, over any size, non-destructive.
+- **Follow / tail + highlighters.** Follow a growing file as it's written, with saved
+  pattern→colour rules (ERROR red, WARN amber).
+- **One-key pretty-print.** Open a minified JSON blob that freezes other editors and
+  reflow it with a keystroke.
+- **A real editor underneath.** Tabs, undo/redo, find & replace (regex), syntax
+  highlighting, a file tree, a collapsible outline, a command palette, session restore.
+- **Safe by default.** Atomic save (a failed write can't destroy your file), encoding
+  detection (UTF-8/BOM, UTF-16, Latin-1), a restrictive Content-Security-Policy.
 
-Line the editor field up against five attributes, fast/native (not Electron), truly cross-platform, open-source and free, simple-by-default yet extensible, and first-class Markdown with live preview, and **no single product scores on all five**. Notepad++ fails cross-platform and modern Markdown; NotepadNext is cross-platform but under-resourced; Sublime is native but closed/paid; VS Code is cross-platform but heavy; Typora nails Markdown but is closed; the OSS Markdown editors are all Electron or stalled. That intersection is the gap. (Full analysis in `docs/`.)
+## Demo
 
-## Status (2026-10-19)
+A short demo GIF is coming: open a multi-GB log, filter to `ERROR`, follow it live with
+red highlights, then pretty-print a minified JSON file, all instantly.
 
-Early but usable. A Rust editing core (a `ropey` rope buffer, plus a read-only memory-mapped engine for huge files) sits behind a `Buffer` trait, with a virtualised web-view that fetches only the on-screen lines: open / edit / save, tabs, a file tree, syntax highlighting, find/replace. Heading for a first public release (**v0.1.0**) that leads with large-file handling. A public `ROADMAP.md` lands before release.
+## Install
 
-## Tech stack
+Grab the installer for your OS from the [latest release](../../releases/latest):
 
-- **Tauri** (Rust core + web UI), small native binaries, cross-platform, modern UI without Electron's weight. ADR-0001.
-- **Editing core: a Rust rope engine** (`ropey`), the text buffer lives in Rust, the web-view renders only the visible viewport; large files (no ~2 GB Notepad++ cliff) are the point. Chosen deliberately over a web editor. ADR-0002.
-- Syntax highlighting: **tree-sitter** (planned).
+- **Windows** — `.msi` or `.exe`
+- **macOS** — `.dmg` (universal: Apple Silicon + Intel)
+- **Linux** — `.AppImage`, `.deb`, or `.rpm`
 
-## Repository layout
+**First-launch note (unsigned builds).** 0.1.0 ships unsigned, so your OS will warn
+once:
 
+- **Windows:** SmartScreen says "Windows protected your PC" → **More info** → **Run
+  anyway**.
+- **macOS:** Gatekeeper says the developer can't be verified → right-click the app →
+  **Open** (or allow it in System Settings → Privacy & Security).
+
+Signing is on the roadmap once there's traction.
+
+## Build from source
+
+Needs [Rust](https://rustup.rs), Node 20+, and the Tauri prerequisites for your OS.
+
+```sh
+just setup     # install git hooks + frontend deps
+just dev       # run with hot reload
+just build     # a release bundle for your OS
 ```
-tuhi/
-├── README.md
-├── LICENSE-MIT / LICENSE-APACHE
-├── docs/                     # research + scope ("base point scope")
-│   ├── 00-current-state-notepadpp.md
-│   ├── 01-user-research.md
-│   ├── 02-competitive-landscape.md
-│   ├── 03-engineering-practices.md
-│   ├── 04-product-scope.md
-│   └── decisions/            # ADRs (0001 stack, 0002 editing core)
-├── brand/                    # logo + brand assets
-├── app/                      # the Tauri application
-│   ├── src/                  #   web UI (React/TS)
-│   └── src-tauri/            #   Rust: editor core in src/editor/
-├── scripts/                  # dev + check scripts (just-driven)
-├── justfile                  # task runner
-└── .github/                  # CI + PR template
-```
 
-## Working on it
+No `just`? The recipes just wrap `npm` in `app/` (`cd app && npm install`, then
+`npm run tauri dev` / `npm run tauri build`).
 
-Bootstrap once with `just setup` (installs the git hooks and the frontend deps; or `npm install` in `app/`), then `just dev` to run and `just check` before pushing. Builds write to a separate checkout outside the synced drive, so build output doesn't thrash cloud sync.
+## Status & roadmap
+
+0.1.0 is the first public release. What's next (Markdown mode, viewport highlighting,
+editable large files, and more) is in [`ROADMAP.md`](ROADMAP.md).
+
+## Contributing
+
+Issues and PRs welcome. See [`CONTRIBUTING.md`](CONTRIBUTING.md),
+[`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md), and [`SECURITY.md`](SECURITY.md).
 
 ## Licence
 
-Dual-licensed under **MIT OR Apache-2.0**, at your option (permissive, the Rust-ecosystem norm). See [`LICENSE-MIT`](LICENSE-MIT) and [`LICENSE-APACHE`](LICENSE-APACHE). Contributions are accepted under the same dual licence.
+Dual-licensed under **MIT OR Apache-2.0**, at your option, the Rust-ecosystem norm. See
+[`LICENSE-MIT`](LICENSE-MIT) and [`LICENSE-APACHE`](LICENSE-APACHE).
 
 ## Built with AI assistance
 
-tuhi is built by Vernon Kay with heavy use of AI assistance (Claude Code). The code, the decisions and the responsibility are the author's; the AI is a tool, disclosed here rather than credited per commit (see `AGENTS.md`).
-
-## Provenance
-
-Research strands run 2026-10-18 via web search and fetch, plus a read of a prior codebase for generic engineering discipline only (no third-party code or config lifted). Sources cited inline in `docs/`.
+tuhi is built by Vernon Kay with heavy use of AI assistance (Claude Code). The code, the
+decisions and the responsibility are the author's; the AI is a tool, disclosed here
+rather than credited per commit.
