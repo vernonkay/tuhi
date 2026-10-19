@@ -125,6 +125,15 @@ pub trait Buffer: Send {
     fn outline(&self) -> Vec<OutlineItem> {
         Vec::new()
     }
+    /// Undo the last edit; return the caret char-index to move to, or `None` if
+    /// there is nothing to undo (or the engine has no undo, e.g. the mmap engine).
+    fn undo(&mut self) -> Result<Option<usize>, EditorError> {
+        Ok(None)
+    }
+    /// Redo the last undone edit; see [`Buffer::undo`].
+    fn redo(&mut self) -> Result<Option<usize>, EditorError> {
+        Ok(None)
+    }
 }
 
 /// One open document (a tab).
@@ -221,6 +230,19 @@ impl Default for EditorState {
     }
 }
 
+/// Cap on undo-history entries; the oldest are dropped past this (bounds memory).
+const MAX_UNDO: usize = 2000;
+
+/// One reversible change: at character index `at`, `removed` was replaced by
+/// `inserted`. Redo deletes `removed` then inserts `inserted`; undo does the
+/// reverse. A plain insert has an empty `removed`; a plain delete an empty `inserted`.
+#[derive(Debug, Clone)]
+struct Change {
+    at: usize,
+    removed: String,
+    inserted: String,
+}
+
 /// `ropey`-backed buffer: the whole document lives in memory in a rope.
 ///
 /// Edits and large-but-RAM-sized files are cheap (O(log n)); its ceiling is that
@@ -237,6 +259,9 @@ pub struct RopeBuffer {
     /// rather than silently rewriting a non-UTF-8 file as UTF-8.
     encoding: Encoding,
     bom: bool,
+    /// Undo/redo history of reversible changes (newest on top of each stack).
+    undo_stack: Vec<Change>,
+    redo_stack: Vec<Change>,
 }
 
 impl Default for RopeBuffer {
@@ -250,6 +275,8 @@ impl Default for RopeBuffer {
             dark: false,
             encoding: Encoding::Utf8,
             bom: false,
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
         }
     }
 }
@@ -262,6 +289,14 @@ impl RopeBuffer {
             char_count: self.rope.len_chars(),
             dirty: self.dirty,
             readonly: false,
+        }
+    }
+
+    /// Push a change onto the undo stack, dropping the oldest past the cap.
+    fn push_undo(&mut self, change: Change) {
+        self.undo_stack.push(change);
+        if self.undo_stack.len() > MAX_UNDO {
+            self.undo_stack.remove(0);
         }
     }
 }
@@ -278,6 +313,8 @@ impl Buffer for RopeBuffer {
         self.bom = decoded.bom;
         self.path = Some(PathBuf::from(path));
         self.dirty = false;
+        self.undo_stack.clear();
+        self.redo_stack.clear();
         self.ext = std::path::Path::new(path)
             .extension()
             .and_then(|e| e.to_str())
@@ -319,8 +356,31 @@ impl Buffer for RopeBuffer {
         if char_idx > self.rope.len_chars() {
             return Err(EditorError::IndexOutOfRange { idx: char_idx, len: self.rope.len_chars() });
         }
+        if text.is_empty() {
+            return Ok(self.make_meta());
+        }
         self.rope.insert(char_idx, text);
         self.dirty = true;
+        self.redo_stack.clear();
+        // Coalesce contiguous typing into one undo step: extend the last change when
+        // it is a pure insert, the new text continues immediately after it, and
+        // neither crosses a newline. A caret move makes `char_idx` non-contiguous,
+        // which ends the run naturally.
+        let coalesced = match self.undo_stack.last_mut() {
+            Some(last)
+                if last.removed.is_empty()
+                    && !text.contains('\n')
+                    && !last.inserted.ends_with('\n')
+                    && char_idx == last.at + last.inserted.chars().count() =>
+            {
+                last.inserted.push_str(text);
+                true
+            }
+            _ => false,
+        };
+        if !coalesced {
+            self.push_undo(Change { at: char_idx, removed: String::new(), inserted: text.to_string() });
+        }
         Ok(self.make_meta())
     }
 
@@ -328,8 +388,14 @@ impl Buffer for RopeBuffer {
         if start > end || end > self.rope.len_chars() {
             return Err(EditorError::InvalidRange { start, end });
         }
+        if start == end {
+            return Ok(self.make_meta());
+        }
+        let removed = self.rope.slice(start..end).to_string();
         self.rope.remove(start..end);
         self.dirty = true;
+        self.redo_stack.clear();
+        self.push_undo(Change { at: start, removed, inserted: String::new() });
         Ok(self.make_meta())
     }
 
@@ -464,6 +530,9 @@ impl Buffer for RopeBuffer {
             } else {
                 re.replace_all(&text, regex::NoExpand(replacement)).into_owned()
             };
+            self.redo_stack.clear();
+            // One undo step for the whole replace-all (stores the before/after text).
+            self.push_undo(Change { at: 0, removed: text, inserted: new.clone() });
             self.rope = Rope::from_str(&new);
             self.dirty = true;
             self.rehighlight();
@@ -520,6 +589,36 @@ impl Buffer for RopeBuffer {
             }
         }
         out
+    }
+
+    fn undo(&mut self) -> Result<Option<usize>, EditorError> {
+        let Some(change) = self.undo_stack.pop() else {
+            return Ok(None);
+        };
+        // Reverse the change: remove what it inserted, restore what it removed.
+        let ins_len = change.inserted.chars().count();
+        self.rope.remove(change.at..change.at + ins_len);
+        self.rope.insert(change.at, &change.removed);
+        let caret = change.at + change.removed.chars().count();
+        self.redo_stack.push(change);
+        self.dirty = true;
+        self.rehighlight();
+        Ok(Some(caret))
+    }
+
+    fn redo(&mut self) -> Result<Option<usize>, EditorError> {
+        let Some(change) = self.redo_stack.pop() else {
+            return Ok(None);
+        };
+        // Re-apply: remove what it removed, insert what it inserted.
+        let rem_len = change.removed.chars().count();
+        self.rope.remove(change.at..change.at + rem_len);
+        self.rope.insert(change.at, &change.inserted);
+        let caret = change.at + change.inserted.chars().count();
+        self.undo_stack.push(change);
+        self.dirty = true;
+        self.rehighlight();
+        Ok(Some(caret))
     }
 }
 
@@ -635,6 +734,30 @@ pub fn save_document(
     state: State<EditorState>,
 ) -> Result<DocumentMeta, EditorError> {
     state.0.lock().map_err(|_| EditorError::LockPoisoned)?.active_buffer_mut()?.save(path)
+}
+
+/// Document meta after an undo/redo, plus where the caret should land (`None` when
+/// there was nothing to undo/redo, so the UI leaves the caret where it is).
+#[derive(Serialize)]
+pub struct EditOutcome {
+    pub meta: DocumentMeta,
+    pub caret: Option<usize>,
+}
+
+#[tauri::command]
+pub fn undo(state: State<EditorState>) -> Result<EditOutcome, EditorError> {
+    let mut reg = state.0.lock().map_err(|_| EditorError::LockPoisoned)?;
+    let b = reg.active_buffer_mut()?;
+    let caret = b.undo()?;
+    Ok(EditOutcome { meta: b.meta(), caret })
+}
+
+#[tauri::command]
+pub fn redo(state: State<EditorState>) -> Result<EditOutcome, EditorError> {
+    let mut reg = state.0.lock().map_err(|_| EditorError::LockPoisoned)?;
+    let b = reg.active_buffer_mut()?;
+    let caret = b.redo()?;
+    Ok(EditOutcome { meta: b.meta(), caret })
 }
 
 #[tauri::command]
@@ -906,5 +1029,70 @@ mod tests {
         assert!(sub.is_dir(), "the original must still be there after a failed save");
         assert!(temp_leftovers(&dir, &base).is_empty(), "temp files left behind");
         let _ = fs::remove_dir(&sub);
+    }
+
+    #[test]
+    fn undo_redo_insert_and_delete() {
+        let mut b = RopeBuffer::default();
+        b.insert(0, "hello").unwrap(); // one change (single insert call)
+        b.delete(0, 1).unwrap(); // -> "ello"
+        assert_eq!(b.rope.to_string(), "ello");
+
+        // Undo the delete: "h" comes back, caret after it.
+        assert_eq!(b.undo().unwrap(), Some(1));
+        assert_eq!(b.rope.to_string(), "hello");
+        // Undo the insert: back to empty.
+        assert_eq!(b.undo().unwrap(), Some(0));
+        assert_eq!(b.rope.to_string(), "");
+        // Nothing left to undo.
+        assert_eq!(b.undo().unwrap(), None);
+
+        // Redo both in order.
+        b.redo().unwrap();
+        assert_eq!(b.rope.to_string(), "hello");
+        b.redo().unwrap();
+        assert_eq!(b.rope.to_string(), "ello");
+        assert_eq!(b.redo().unwrap(), None);
+    }
+
+    #[test]
+    fn contiguous_typing_coalesces_into_one_undo_step() {
+        let mut b = RopeBuffer::default();
+        // Type h-e-l-l-o as five contiguous single-char inserts.
+        for (i, ch) in "hello".chars().enumerate() {
+            b.insert(i, &ch.to_string()).unwrap();
+        }
+        assert_eq!(b.rope.to_string(), "hello");
+        // One undo removes the whole typed run.
+        b.undo().unwrap();
+        assert_eq!(b.rope.to_string(), "");
+        assert_eq!(b.undo().unwrap(), None);
+    }
+
+    #[test]
+    fn newline_breaks_the_coalesced_run() {
+        let mut b = RopeBuffer::default();
+        b.insert(0, "a").unwrap();
+        b.insert(1, "\n").unwrap(); // ends a run
+        b.insert(2, "b").unwrap(); // starts a fresh run
+        assert_eq!(b.rope.to_string(), "a\nb");
+        b.undo().unwrap();
+        assert_eq!(b.rope.to_string(), "a\n");
+        b.undo().unwrap();
+        assert_eq!(b.rope.to_string(), "a");
+        b.undo().unwrap();
+        assert_eq!(b.rope.to_string(), "");
+    }
+
+    #[test]
+    fn a_new_edit_clears_the_redo_stack() {
+        let mut b = RopeBuffer::default();
+        b.insert(0, "abc").unwrap();
+        b.undo().unwrap();
+        assert_eq!(b.rope.to_string(), "");
+        // Typing again discards the redo history.
+        b.insert(0, "x").unwrap();
+        assert_eq!(b.redo().unwrap(), None);
+        assert_eq!(b.rope.to_string(), "x");
     }
 }
