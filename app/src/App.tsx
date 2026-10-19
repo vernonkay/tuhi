@@ -43,6 +43,13 @@ interface EditOutcome {
   caret: number | null;
 }
 
+/** Mirror of the Rust `FilterMatch`: one matching line in the filter view. */
+interface FilterMatch {
+  line: number;
+  text: string;
+  truncated: boolean;
+}
+
 /** A coloured run within a line, in character columns [start, end). */
 interface Span {
   start: number;
@@ -203,6 +210,13 @@ function IconCommand() {
     </svg>
   );
 }
+function IconFilter() {
+  return (
+    <svg {...iconProps}>
+      <path d="M3 5h18l-7 8v6l-4-2v-4z" />
+    </svg>
+  );
+}
 function IconFolder() {
   return (
     <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden style={{ width: 14, height: 14 }}>
@@ -247,6 +261,9 @@ function App() {
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [outlineOpen, setOutlineOpen] = useState(true);
   const [outline, setOutline] = useState<OutlineItem[]>([]);
+  const [filterOpen, setFilterOpen] = useState(false);
+  const [filterQuery, setFilterQuery] = useState("");
+  const [filterMatches, setFilterMatches] = useState<FilterMatch[]>([]);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [paletteQuery, setPaletteQuery] = useState("");
   const [paletteIndex, setPaletteIndex] = useState(0);
@@ -676,6 +693,38 @@ function App() {
     }
   }, [meta, readonly, setCaretFromIdx]);
 
+  // Live filter-to-view: show only the lines matching a regex (non-destructive).
+  // Works on any size, including the read-only mmap engine, so huge logs filter too.
+  const runFilter = useCallback(
+    async (q: string) => {
+      if (!meta || !q) {
+        setFilterMatches([]);
+        return;
+      }
+      try {
+        setFilterMatches(
+          await invoke<FilterMatch[]>("filter_lines", { query: q, useRegex: true, caseSensitive: false }),
+        );
+      } catch {
+        setFilterMatches([]); // invalid regex (mid-typing) → show nothing yet
+      }
+    },
+    [meta],
+  );
+
+  const openFilter = useCallback(() => {
+    if (!meta) return;
+    setFilterQuery("");
+    setFilterMatches([]);
+    setFilterOpen(true);
+  }, [meta]);
+
+  const closeFilter = useCallback(() => {
+    setFilterOpen(false);
+    setFilterMatches([]);
+    scrollerRef.current?.focus();
+  }, []);
+
   // --- Editing. Every op goes through the char-indexed Rust buffer. ---
 
   const insertText = useCallback(
@@ -846,6 +895,13 @@ function App() {
   useEffect(() => {
     if (findOpen) void runSearch(findQuery);
   }, [findQuery, useRegex, caseSensitive, findOpen, runSearch]);
+
+  // Debounced live filter as the filter query changes.
+  useEffect(() => {
+    if (!filterOpen) return;
+    const t = setTimeout(() => void runFilter(filterQuery), 150);
+    return () => clearTimeout(t);
+  }, [filterQuery, filterOpen, runFilter]);
 
   // Session restore on mount. If the Rust process still has tabs (a dev hot-reload),
   // adopt them. Otherwise (a real restart) reopen the files that were open last time,
@@ -1128,6 +1184,7 @@ function App() {
       ...(meta ? [{ label: "Save", hint: combo("S"), kind: C, run: () => void handleSave() }] : []),
       ...(meta && !readonly ? [{ label: "Find in file…", hint: combo("F"), kind: C, run: () => openFind(false) }] : []),
       ...(meta && !readonly ? [{ label: "Format JSON (pretty-print)", kind: C, run: () => void formatJson() }] : []),
+      ...(meta ? [{ label: "Filter lines to view…", kind: C, run: () => openFilter() }] : []),
       { label: "Toggle file tree", kind: C, run: () => setTreeOpen((v) => !v) },
       { label: "Toggle outline", kind: C, run: () => setOutlineOpen((v) => !v) },
       ...tabs.map((t) => ({ label: t.name, kind: "tab" as const, run: () => void switchTab(t.id) })),
@@ -1216,6 +1273,14 @@ function App() {
           title="Find (Ctrl+F)"
         >
           <IconSearch />
+        </button>
+        <button
+          className={`rail-btn${filterOpen ? " on" : ""}`}
+          onClick={() => (filterOpen ? closeFilter() : openFilter())}
+          disabled={!meta}
+          title="Filter lines to view"
+        >
+          <IconFilter />
         </button>
         <button className="rail-btn" onClick={openPalette} title={`Command palette (${combo("P")})`}>
           <IconCommand />
@@ -1368,6 +1433,60 @@ function App() {
             )}
           </div>
         </aside>
+      )}
+      {filterOpen && (
+        <div className="filter-view">
+          <div className="filter-bar">
+            <input
+              className="filter-input"
+              autoFocus
+              placeholder="Filter lines by regex (e.g. ERROR|WARN)…"
+              value={filterQuery}
+              onChange={(e) => setFilterQuery(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Escape") {
+                  e.preventDefault();
+                  closeFilter();
+                }
+              }}
+            />
+            <span className="filter-count">
+              {filterMatches.length >= 1000
+                ? "1000+ (first 1000)"
+                : `${filterMatches.length} line${filterMatches.length === 1 ? "" : "s"}`}
+            </span>
+            <button className="find-btn" onClick={closeFilter} title="Close (Esc)">
+              ✕
+            </button>
+          </div>
+          <div className="filter-list">
+            {filterMatches.length ? (
+              filterMatches.map((m) => (
+                <div
+                  key={m.line}
+                  className="filter-row"
+                  onClick={() => {
+                    closeFilter();
+                    void jumpToLine(m.line);
+                  }}
+                  title={`Go to line ${m.line + 1}`}
+                >
+                  <span className="filter-gutter">{m.line + 1}</span>
+                  <span className="filter-text">
+                    {renderLine(m.text.replace(/\r?\n$/, ""), [])}
+                    {m.truncated && <span className="trunc"> ⋯</span>}
+                  </span>
+                </div>
+              ))
+            ) : (
+              <div className="filter-empty">
+                {filterQuery
+                  ? "No matching lines"
+                  : "Type a regex to collapse the document to just the matching lines."}
+              </div>
+            )}
+          </div>
+        </div>
       )}
       </div>
 

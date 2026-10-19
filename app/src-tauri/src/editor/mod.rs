@@ -83,6 +83,17 @@ pub struct OutlineItem {
     pub line: usize,
 }
 
+/// Cap on filter results, so even a huge log returns a bounded payload.
+const MAX_FILTER_MATCHES: usize = 1000;
+
+/// One matching line from a live filter: its 0-based line index and (capped) text.
+#[derive(Serialize)]
+pub struct FilterMatch {
+    pub line: usize,
+    pub text: String,
+    pub truncated: bool,
+}
+
 /// The editing buffer behind the Tauri commands.
 ///
 /// Addressing is by Unicode character index for now; the move to viewport-local
@@ -141,6 +152,16 @@ pub trait Buffer: Send {
     /// Replace the whole document in one undoable step (read-only engines refuse).
     fn replace_document(&mut self, _text: &str) -> Result<DocumentMeta, EditorError> {
         Err(EditorError::ReadOnly)
+    }
+    /// Lines matching `query` (as a regex), for the non-destructive filter view.
+    /// Capped at [`MAX_FILTER_MATCHES`]. Default: no matches.
+    fn filter(
+        &self,
+        _query: &str,
+        _use_regex: bool,
+        _case_sensitive: bool,
+    ) -> Result<Vec<FilterMatch>, EditorError> {
+        Ok(Vec::new())
     }
 }
 
@@ -648,6 +669,37 @@ impl Buffer for RopeBuffer {
         self.rehighlight();
         Ok(self.make_meta())
     }
+
+    fn filter(
+        &self,
+        query: &str,
+        use_regex: bool,
+        case_sensitive: bool,
+    ) -> Result<Vec<FilterMatch>, EditorError> {
+        if query.is_empty() {
+            return Ok(Vec::new());
+        }
+        let re = build_regex(query, use_regex, case_sensitive).map_err(EditorError::Regex)?;
+        let mut out = Vec::new();
+        for i in 0..self.rope.len_lines() {
+            let line = self.rope.line(i);
+            let s = line.to_string();
+            if re.is_match(&s) {
+                let chars = line.len_chars();
+                let truncated = chars > MAX_VIEWPORT_LINE;
+                let text = if truncated {
+                    line.slice(0..MAX_VIEWPORT_LINE).to_string()
+                } else {
+                    s
+                };
+                out.push(FilterMatch { line: i, text, truncated });
+                if out.len() >= MAX_FILTER_MATCHES {
+                    break;
+                }
+            }
+        }
+        Ok(out)
+    }
 }
 
 // Tauri commands — thin delegations to the active buffer behind the mutex.
@@ -850,6 +902,23 @@ pub fn replace_all(
         .active_buffer_mut()?
         .replace_all(&query, use_regex, case_sensitive, &replacement)?;
     Ok(ReplaceResult { meta, count })
+}
+
+/// Lines matching a regex, for the live filter-to-view (works on both engines, so a
+/// huge log can be filtered too). Capped at `MAX_FILTER_MATCHES`.
+#[tauri::command]
+pub fn filter_lines(
+    query: String,
+    use_regex: bool,
+    case_sensitive: bool,
+    state: State<EditorState>,
+) -> Result<Vec<FilterMatch>, EditorError> {
+    state
+        .0
+        .lock()
+        .map_err(|_| EditorError::LockPoisoned)?
+        .active_buffer()?
+        .filter(&query, use_regex, case_sensitive)
 }
 
 /// List one directory's immediate children (the file tree expands lazily per folder).

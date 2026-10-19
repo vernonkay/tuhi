@@ -35,6 +35,7 @@ pub fn run() {
             editor::close_tab,
             editor::refresh_highlights,
             editor::list_dir,
+            editor::filter_lines,
             editor::get_outline,
             editor::home_dir,
         ])

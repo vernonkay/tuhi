@@ -134,7 +134,60 @@ html, body, #root {
 .ft-caret.open { transform: rotate(90deg); }
 
 /* Editor + outline row */
-.workarea { flex: 1; display: flex; min-height: 0; min-width: 0; }
+.workarea { flex: 1; display: flex; min-height: 0; min-width: 0; position: relative; }
+
+/* Filter-to-view: a read-only overlay listing only the matching lines. Sits over the
+   editor (which stays mounted underneath), so closing it restores state instantly. */
+.filter-view {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  background: var(--paper);
+}
+.filter-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel);
+}
+.filter-input {
+  flex: 1;
+  min-width: 0;
+  font: inherit;
+  font-size: 13px;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--paper);
+  color: var(--ink);
+}
+.filter-input:focus { outline: none; border-color: var(--coral); }
+.filter-count { font-size: 12px; color: var(--slate); flex: 0 0 auto; }
+.filter-list { flex: 1; overflow: auto; padding: 2px 0; }
+.filter-empty { color: var(--slate); font-size: 13px; padding: 16px; }
+.filter-row {
+  display: flex;
+  gap: 10px;
+  padding: 1px 10px;
+  font-family: var(--mono-font);
+  font-size: 13px;
+  line-height: 20px;
+  white-space: pre;
+  cursor: pointer;
+}
+.filter-row:hover { background: var(--coral-soft); }
+.filter-gutter {
+  flex: 0 0 auto;
+  min-width: 56px;
+  text-align: right;
+  color: var(--slate);
+  user-select: none;
+}
+.filter-text { flex: 1; overflow: hidden; text-overflow: ellipsis; }
 
 /* Outline panel (Studio) */
 .outline-panel {
