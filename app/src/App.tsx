@@ -71,6 +71,25 @@ interface OutlineItem {
   line: number;
 }
 
+/** A nested outline entry (children are deeper-level items beneath it). */
+interface OutlineNode extends OutlineItem {
+  children: OutlineNode[];
+}
+
+/** Build a tree from the flat, in-document-order outline using heading/indent level:
+ *  each item nests under the nearest preceding item of a smaller level. */
+function buildOutlineTree(items: OutlineItem[]): OutlineNode[] {
+  const roots: OutlineNode[] = [];
+  const stack: OutlineNode[] = [];
+  for (const it of items) {
+    const node: OutlineNode = { ...it, children: [] };
+    while (stack.length && stack[stack.length - 1].level >= it.level) stack.pop();
+    (stack.length ? stack[stack.length - 1].children : roots).push(node);
+    stack.push(node);
+  }
+  return roots;
+}
+
 /** A command-palette entry: a label, an optional hint, its group, and its action. */
 type PaletteItem = { label: string; hint?: string; kind: "command" | "tab" | "file"; run: () => void };
 
@@ -271,6 +290,7 @@ function App() {
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [outline, setOutline] = useState<OutlineItem[]>([]);
   const [outlineQuery, setOutlineQuery] = useState("");
+  const [outlineExpanded, setOutlineExpanded] = useState<Set<number>>(new Set());
   const [filterOpen, setFilterOpen] = useState(false);
   const [filterQuery, setFilterQuery] = useState("");
   const [filterMatches, setFilterMatches] = useState<FilterMatch[]>([]);
@@ -687,6 +707,58 @@ function App() {
     },
     [setCaretFromIdx],
   );
+
+  // The outline as a nested tree, and a sensible default expansion: small files open
+  // fully expanded (see the whole structure); large ones collapse to the top level so
+  // a 1000-heading doc shows a handful of roots you drill into, not a wall.
+  const outlineTree = useMemo(() => buildOutlineTree(outline), [outline]);
+  useEffect(() => {
+    if (outline.length === 0) setOutlineExpanded(new Set());
+    else if (outline.length <= 50) setOutlineExpanded(new Set(outline.map((o) => o.line)));
+    else setOutlineExpanded(new Set());
+  }, [outline]);
+
+  const toggleOutlineNode = useCallback((line: number) => {
+    setOutlineExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(line)) next.delete(line);
+      else next.add(line);
+      return next;
+    });
+  }, []);
+
+  // Recursive collapsible render of the outline tree.
+  const renderOutlineNodes = (nodes: OutlineNode[], depth: number): React.ReactNode =>
+    nodes.map((n) => {
+      const hasKids = n.children.length > 0;
+      const open = outlineExpanded.has(n.line);
+      return (
+        <div key={n.line}>
+          <div
+            className="op-row"
+            style={{ paddingLeft: 8 + depth * 12 }}
+            onClick={() => void jumpToLine(n.line)}
+            title={n.title}
+          >
+            {hasKids ? (
+              <span
+                className={`op-caret${open ? " open" : ""}`}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  toggleOutlineNode(n.line);
+                }}
+              >
+                ▸
+              </span>
+            ) : (
+              <span className="op-caret-sp" />
+            )}
+            <span className="op-label">{n.title}</span>
+          </div>
+          {hasKids && open && renderOutlineNodes(n.children, depth + 1)}
+        </div>
+      );
+    });
 
   const openPalette = useCallback(() => {
     setPaletteQuery("");
@@ -1436,24 +1508,31 @@ function App() {
               )}
               <div className="op-body">
                 {(() => {
-                  const q = outlineQuery.trim().toLowerCase();
-                  const rows = q ? outline.filter((o) => o.title.toLowerCase().includes(q)) : outline;
                   if (!outline.length) {
                     return <p className="op-empty">{meta ? "No headings" : "No file open"}</p>;
                   }
-                  if (!rows.length) {
-                    return <p className="op-empty">No matches</p>;
+                  const q = outlineQuery.trim().toLowerCase();
+                  if (q) {
+                    // Filtering: flat list of matches (ignore the tree/collapse).
+                    const rows = outline.filter((o) => o.title.toLowerCase().includes(q));
+                    return rows.length ? (
+                      rows.map((o, i) => (
+                        <div
+                          key={`${o.line}-${i}`}
+                          className="op-row"
+                          onClick={() => void jumpToLine(o.line)}
+                          title={o.title}
+                        >
+                          <span className="op-caret-sp" />
+                          <span className="op-label">{o.title}</span>
+                        </div>
+                      ))
+                    ) : (
+                      <p className="op-empty">No matches</p>
+                    );
                   }
-                  return rows.map((o, i) => (
-                    <div
-                      key={`${o.line}-${i}`}
-                      className={`op-row lvl${o.level}`}
-                      onClick={() => void jumpToLine(o.line)}
-                      title={o.title}
-                    >
-                      {o.title}
-                    </div>
-                  ));
+                  // No filter: the collapsible tree.
+                  return renderOutlineNodes(outlineTree, 0);
                 })()}
               </div>
             </>
