@@ -596,7 +596,7 @@ impl Buffer for RopeBuffer {
         ];
         let mut out = Vec::new();
         for i in 0..self.rope.len_lines() {
-            if out.len() >= 1000 {
+            if out.len() >= 5000 {
                 break;
             }
             let line = self.rope.line(i);
