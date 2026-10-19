@@ -26,12 +26,24 @@ The lovable baseline, leading with large files:
 
 ## Planned / under consideration
 
+Shaped partly by a study of why Google's Xi-editor was abandoned (see
+[`docs/decisions/0004-xi-guardrails.md`](docs/decisions/0004-xi-guardrails.md)).
+Speculative items are tagged **(research)** with their own exit criteria, so they can't
+quietly block shippable work.
+
 - **Viewport (incremental) highlighting** so files above the current ~2 MB cap colour
-  as you scroll, and tree-sitter-based highlighting.
-- **Editable multi-GB files** (a piece-tree engine); today files 25 MB and up open
-  read-only.
+  as you scroll (tree-sitter-based), computed **off the UI thread** so highlighting a
+  huge file never blocks typing.
+- **Editable multi-GB files** (a piece-tree engine) *(research)*; today files 25 MB and
+  up open read-only.
+- **Engine-backed search/replace, go-to-line and line counts over multi-GB files**,
+  using the buffer's tree so none of it has to materialise the whole file.
+- **Crash-safe persistence of unsaved buffers**, via cheap copy-on-write buffer
+  snapshots (near-free once the buffer is persistent) plus autosave.
+- **Correct Unicode editing** — grapheme-cluster cursor movement and column widths.
+- **Background file I/O for load and save only**, off the UI thread, with async kept to
+  the edges and never the edit model.
 - **A smarter outline for very large documents** — summarise/bucket huge flat heading
   lists instead of listing every one.
 - Modern multi-cursor, find-in-files, show-unprintable-characters.
-- Crash-safe persistence of unsaved buffers.
 - Signed / notarised builds once there's traction (0.1.0 ships unsigned).
