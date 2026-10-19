@@ -255,6 +255,15 @@ function App() {
 
   // Studio chrome: file tree, outline, command palette.
   const [treeOpen, setTreeOpen] = useState(false);
+  const [treeWidth, setTreeWidth] = useState<number>(() => {
+    try {
+      const w = Number(localStorage.getItem("tuhi.treeWidth"));
+      if (w >= 140 && w <= 600) return w;
+    } catch {
+      /* default below */
+    }
+    return 220;
+  });
   const [folderRoot, setFolderRoot] = useState<string | null>(null);
   const [folderPinned, setFolderPinned] = useState(false);
   const [dirCache, setDirCache] = useState<Record<string, DirEntry[]>>({});
@@ -338,6 +347,37 @@ function App() {
       }
     },
     [folderPinned, folderRoot, revealPath],
+  );
+
+  // Persist the file-tree width so a resize sticks across launches.
+  useEffect(() => {
+    try {
+      localStorage.setItem("tuhi.treeWidth", String(treeWidth));
+    } catch {
+      /* best-effort */
+    }
+  }, [treeWidth]);
+
+  // Drag the divider on the tree's right edge to resize the panel.
+  const startTreeResize = useCallback(
+    (e: React.MouseEvent) => {
+      e.preventDefault();
+      const startX = e.clientX;
+      const startW = treeWidth;
+      const onMove = (ev: MouseEvent) =>
+        setTreeWidth(Math.min(600, Math.max(140, startW + (ev.clientX - startX))));
+      const onUp = () => {
+        window.removeEventListener("mousemove", onMove);
+        window.removeEventListener("mouseup", onUp);
+        document.body.style.cursor = "";
+        document.body.style.userSelect = "";
+      };
+      document.body.style.cursor = "col-resize";
+      document.body.style.userSelect = "none";
+      window.addEventListener("mousemove", onMove);
+      window.addEventListener("mouseup", onUp);
+    },
+    [treeWidth],
   );
 
   // Cold start: always open the tree at the home folder. Deterministic, never a
@@ -1356,7 +1396,7 @@ function App() {
         </button>
       </nav>
       {treeOpen && (
-        <aside className="filetree">
+        <aside className="filetree" style={{ flex: `0 0 ${treeWidth}px`, width: treeWidth }}>
           <div className="ft-head">
             <span className="ft-title" title={folderRoot ?? ""}>{folderRoot ? baseName(folderRoot) : "Explorer"}</span>
             <span className="ft-sp" />
@@ -1371,6 +1411,15 @@ function App() {
             {folderRoot ? renderDir(folderRoot, 0) : <p className="ft-empty">Open a folder to browse files.</p>}
           </div>
         </aside>
+      )}
+      {treeOpen && (
+        <div
+          className="ft-resizer"
+          onMouseDown={startTreeResize}
+          title="Drag to resize"
+          role="separator"
+          aria-orientation="vertical"
+        />
       )}
       <div className="app">
 
@@ -1476,8 +1525,6 @@ function App() {
           </div>
         ) : (
           <div className="empty">
-            <Mark size={72} />
-            <div className="empty-word">tuhi</div>
             <p className="empty-tag">A fast, open place to write.</p>
             <p className="hint">
               Open a file with <b>Ctrl+O</b>, or pick one from the file tree. tuhi
