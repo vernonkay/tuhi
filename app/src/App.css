@@ -237,18 +237,20 @@ html, body, #root {
 .op-body { flex: 1; overflow: auto; padding: 6px 0; font-size: 13px; }
 .op-empty { color: var(--slate); font-size: 12px; padding: 10px 12px; }
 .op-row {
-  padding: 3px 12px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
   color: var(--slate);
   cursor: pointer;
   white-space: nowrap;
   overflow: hidden;
-  text-overflow: ellipsis;
 }
-.op-row:hover { color: var(--coral); }
-.op-row.lvl1 { font-weight: 600; color: var(--ink); }
-.op-row.lvl2 { padding-left: 22px; }
-.op-row.lvl3 { padding-left: 32px; }
-.op-row.lvl4, .op-row.lvl5, .op-row.lvl6 { padding-left: 42px; font-size: 12px; }
+.op-row:hover { background: rgba(127, 127, 127, 0.1); color: var(--ink); }
+.op-label { overflow: hidden; text-overflow: ellipsis; }
+.op-caret { display: inline-block; width: 12px; font-size: 9px; color: var(--slate); flex: 0 0 auto; transition: transform 0.1s; }
+.op-caret.open { transform: rotate(90deg); }
+.op-caret-sp { display: inline-block; width: 12px; flex: 0 0 auto; }
 
 /* Command palette (Studio) */
 .palette-overlay {
