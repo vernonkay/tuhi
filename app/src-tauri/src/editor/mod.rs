@@ -16,15 +16,17 @@
 use ropey::Rope;
 use serde::Serialize;
 use std::fs::{self, File};
-use std::io::{self, BufReader, BufWriter, Write};
+use std::io::{self, BufWriter, Write};
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::State;
 
+mod encoding;
 mod highlight;
 mod mmapbuf;
 mod search;
+use encoding::Encoding;
 use highlight::{Span, HIGHLIGHT_MAX_BYTES};
 use search::build_regex;
 
@@ -229,6 +231,10 @@ pub struct RopeBuffer {
     ext: String,
     highlights: Vec<Vec<Span>>,
     dark: bool,
+    /// The file's detected encoding and BOM, remembered so save round-trips them
+    /// rather than silently rewriting a non-UTF-8 file as UTF-8.
+    encoding: Encoding,
+    bom: bool,
 }
 
 impl Default for RopeBuffer {
@@ -240,6 +246,8 @@ impl Default for RopeBuffer {
             ext: String::new(),
             highlights: Vec::new(),
             dark: false,
+            encoding: Encoding::Utf8,
+            bom: false,
         }
     }
 }
@@ -258,10 +266,14 @@ impl RopeBuffer {
 
 impl Buffer for RopeBuffer {
     fn open(&mut self, path: &str) -> Result<DocumentMeta, String> {
-        let file = File::open(path).map_err(|e| e.to_string())?;
-        // Streams via a buffered reader; still O(file-size) resident memory —
-        // ropey holds the whole document. ADR-0003 replaces this for large files.
-        self.rope = Rope::from_reader(BufReader::new(file)).map_err(|e| e.to_string())?;
+        // Read the whole file (O(file-size) resident memory — ropey holds the whole
+        // document; ADR-0003's mmap engine covers large files) and decode by detected
+        // encoding, so non-UTF-8 files (many logs) open instead of hard-failing.
+        let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+        let decoded = encoding::decode(&bytes);
+        self.rope = Rope::from_str(&decoded.text);
+        self.encoding = decoded.encoding;
+        self.bom = decoded.bom;
         self.path = Some(PathBuf::from(path));
         self.dirty = false;
         self.ext = std::path::Path::new(path)
@@ -341,10 +353,17 @@ impl Buffer for RopeBuffer {
             .unwrap_or(0);
         let tmp_path = dir.join(format!(".{file_name}.tuhi-tmp-{}-{nanos}", std::process::id()));
 
-        // Write the rope to the temp file and fsync before the rename.
+        // Write the rope to the temp file and fsync before the rename, re-encoding to
+        // the file's original encoding/BOM. Plain UTF-8 (the common case) streams
+        // straight from the rope; other encodings go through a one-shot encode.
         let write = || -> io::Result<()> {
             let mut w = BufWriter::new(File::create(&tmp_path)?);
-            self.rope.write_to(&mut w)?;
+            if self.encoding == Encoding::Utf8 && !self.bom {
+                self.rope.write_to(&mut w)?;
+            } else {
+                let bytes = encoding::encode(&self.rope.to_string(), self.encoding, self.bom);
+                w.write_all(&bytes)?;
+            }
             w.flush()?;
             w.into_inner().map_err(io::IntoInnerError::into_error)?.sync_all()
         };
@@ -846,6 +865,25 @@ mod tests {
         assert_eq!(fs::read_to_string(&path).unwrap(), "first version\nsecond line\n");
 
         assert!(temp_leftovers(&dir, &base).is_empty(), "temp files left behind");
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn opens_non_utf8_file_and_round_trips_on_save() {
+        // A Latin-1 log line with 0xE9 ('é'), which is invalid lone UTF-8 and would
+        // have hard-failed the old `Rope::from_reader` open path.
+        let path = tmp_target("latin1").with_extension("log");
+        let original: Vec<u8> = vec![b'c', b'a', b'f', 0xE9, b' ', b'l', b'o', b'g', b'\n'];
+        fs::write(&path, &original).unwrap();
+
+        let mut b = RopeBuffer::default();
+        b.open(&path.display().to_string()).unwrap();
+        assert_eq!(b.encoding, Encoding::Latin1);
+        assert_eq!(b.rope.to_string(), "café log\n");
+
+        // Saving re-encodes as Latin-1, so the bytes are identical to the original.
+        b.save(None).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), original);
         let _ = fs::remove_file(&path);
     }
 
