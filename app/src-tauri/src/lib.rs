@@ -22,6 +22,8 @@ pub fn run() {
             editor::insert_text,
             editor::delete_range,
             editor::save_document,
+            editor::undo,
+            editor::redo,
             editor::pos_to_char,
             editor::char_to_pos,
             editor::read_range,

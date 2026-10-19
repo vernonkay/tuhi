@@ -35,6 +35,13 @@ interface CaretPos {
   col: number;
 }
 
+/** Mirror of the Rust `EditOutcome`: doc meta after undo/redo + the caret target
+ *  (`caret` is null when there was nothing to undo/redo). */
+interface EditOutcome {
+  meta: DocumentMeta;
+  caret: number | null;
+}
+
 /** A coloured run within a line, in character columns [start, end). */
 interface Span {
   start: number;
@@ -632,6 +639,25 @@ function App() {
     setPaletteOpen(true);
   }, []);
 
+  // Undo / redo. The Rust buffer owns the history and rehighlights itself; here we
+  // just apply the new meta (which refreshes the viewport) and move the caret to
+  // where the change landed. A null caret means there was nothing to do.
+  const undoRedo = useCallback(
+    async (which: "undo" | "redo") => {
+      if (!meta || readonly) return;
+      try {
+        const out = await invoke<EditOutcome>(which);
+        setAnchor(null);
+        setMeta(out.meta);
+        if (out.caret != null) await setCaretFromIdx(out.caret);
+        scrollerRef.current?.focus();
+      } catch (e) {
+        setError(String(e));
+      }
+    },
+    [meta, readonly, setCaretFromIdx],
+  );
+
   // --- Editing. Every op goes through the char-indexed Rust buffer. ---
 
   const insertText = useCallback(
@@ -851,6 +877,18 @@ function App() {
             openFind(true);
           }
           break;
+        case "z":
+          if (meta && !readonly) {
+            e.preventDefault();
+            void undoRedo(e.shiftKey ? "redo" : "undo"); // Ctrl+Shift+Z = redo
+          }
+          break;
+        case "y":
+          if (meta && !readonly) {
+            e.preventDefault();
+            void undoRedo("redo");
+          }
+          break;
         case "p":
           e.preventDefault();
           setPaletteQuery("");
@@ -863,7 +901,7 @@ function App() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [handleOpen, handleSave, closeActiveTab, openFind, meta, readonly]);
+  }, [handleOpen, handleSave, closeActiveTab, openFind, undoRedo, meta, readonly]);
 
   // --- Movement (extend = hold Shift to grow the selection) ---
 
