@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Questions, ideas & show-and-tell
+    url: https://github.com/vernonkay/tuhi/discussions
+    about: For open-ended feedback, questions, and sharing how you use tuhi. Issues are for concrete bugs and feature requests.
+  - name: Security vulnerability
+    url: https://github.com/vernonkay/tuhi/security/advisories/new
+    about: Please report security issues privately here, not as a public issue.

@@ -1,0 +1,38 @@
+name: Feature request
+description: Suggest an improvement or new capability
+labels: ["type:enhancement", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the idea. It's worth a quick skim of [VISION.md](https://github.com/vernonkay/tuhi/blob/main/VISION.md) first, it says what tuhi is deliberately trying to be (and not be). Ideas outside that are still welcome, best raised as a [Discussion](https://github.com/vernonkay/tuhi/discussions).
+  - type: textarea
+    id: problem
+    attributes:
+      label: What's the problem?
+      description: What are you trying to do that tuhi makes hard or impossible today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What would you like?
+      description: Your proposed solution, and any alternatives you considered
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Large files / performance
+        - Editing / core
+        - Markdown / outline
+        - UI / palette / themes
+        - Build / packaging
+        - Other
+  - type: textarea
+    id: more
+    attributes:
+      label: Anything else?
+      description: Context, examples, or how you work today
