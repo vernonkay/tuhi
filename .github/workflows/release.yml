@@ -1,0 +1,56 @@
+# Release pipeline: on a version tag (v*), build installable bundles for Windows,
+# macOS and Linux and attach them to a GitHub Release. The Release is created as a
+# DRAFT so it can be reviewed before publishing. Pattern: tauri-apps/tauri-action.
+#
+# Note: builds are unsigned (project decision for 0.1.0); the README documents the
+# one-time SmartScreen/Gatekeeper steps. CI actions are pinned to major-version tags;
+# pinning to commit SHAs is a hardening follow-up.
+name: release
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: bundle (${{ matrix.platform }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: ubuntu-latest
+            args: ''
+          - platform: macos-latest
+            args: '--target universal-apple-darwin'
+          - platform: windows-latest
+            args: ''
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install Linux Tauri deps
+        if: matrix.platform == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: cd app && npm ci
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: app
+          tagName: ${{ github.ref_name }}
+          releaseName: 'tuhi ${{ github.ref_name }}'
+          releaseBody: 'See CHANGELOG.md. Unsigned build: on first launch Windows SmartScreen / macOS Gatekeeper will warn — the README has the one-time steps.'
+          releaseDraft: true
+          prerelease: false
+          args: ${{ matrix.args }}
