@@ -148,6 +148,8 @@ struct Tab {
 pub struct TabSummary {
     pub id: u32,
     pub name: String,
+    /// The file's path, if saved (used to reopen the session on next launch).
+    pub path: Option<String>,
     pub dirty: bool,
     pub readonly: bool,
     pub active: bool,
@@ -204,6 +206,7 @@ impl Registry {
                 TabSummary {
                     id: t.id,
                     name,
+                    path: t.path.clone(),
                     dirty: m.dirty,
                     readonly: m.readonly,
                     active: Some(t.id) == self.active,

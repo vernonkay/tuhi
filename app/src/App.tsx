@@ -17,6 +17,7 @@ interface DocumentMeta {
 interface TabSummary {
   id: number;
   name: string;
+  path: string | null;
   dirty: boolean;
   readonly: boolean;
   active: boolean;
@@ -224,6 +225,20 @@ function App() {
   const [activeTabId, setActiveTabId] = useState<number | null>(null);
   const [lines, setLines] = useState<ViewportLine[]>([]);
 
+  // Snapshot the saved session once at first render, before the persist effect can
+  // overwrite it, so the restore-on-mount effect reads a stable value.
+  const [savedSession] = useState<{ files: string[]; active: string | null }>(() => {
+    try {
+      const files = JSON.parse(localStorage.getItem("tuhi.openFiles") || "[]");
+      return {
+        files: Array.isArray(files) ? files : [],
+        active: localStorage.getItem("tuhi.activeFile"),
+      };
+    } catch {
+      return { files: [], active: null };
+    }
+  });
+
   // Studio chrome: file tree, outline, command palette.
   const [treeOpen, setTreeOpen] = useState(false);
   const [folderRoot, setFolderRoot] = useState<string | null>(null);
@@ -305,21 +320,16 @@ function App() {
           return null;
         }
       };
-      // Only reopen a folder the user *explicitly* pinned via Open Folder. A loose
-      // file's directory is never remembered, so a fresh start always lands on home.
+      // Open the tree at the last directory we were in (the same place the OS
+      // Open dialog remembers), falling back to home on a genuinely fresh start.
       let root: string | null = null;
-      let pinned = false;
       try {
-        if (localStorage.getItem("tuhi.folderPinned") === "1") {
-          root = localStorage.getItem("tuhi.folderRoot");
-          pinned = true;
-        }
+        root = localStorage.getItem("tuhi.lastDir");
       } catch {
         /* no persisted location */
       }
       let kids = root ? await list(root) : null;
       if (!kids) {
-        pinned = false;
         try {
           root = await invoke<string | null>("home_dir");
         } catch {
@@ -331,28 +341,22 @@ function App() {
       const r = root;
       const k = kids;
       setFolderRoot((cur) => cur ?? r);
-      setFolderPinned(pinned);
       setDirCache((prev) => (r in prev ? prev : { ...prev, [r]: k }));
       setTreeOpen(true);
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Remember only an explicitly pinned folder (Open Folder) for next launch; a
-  // loose file's directory is deliberately not persisted, so startup stays on home.
+  // Remember the current tree root as "last directory", so the next launch opens
+  // where we left off (mirroring the OS dialog). A fresh profile has no value here,
+  // so it lands on home.
   useEffect(() => {
     try {
-      if (folderPinned && folderRoot) {
-        localStorage.setItem("tuhi.folderRoot", folderRoot);
-        localStorage.setItem("tuhi.folderPinned", "1");
-      } else {
-        localStorage.removeItem("tuhi.folderRoot");
-        localStorage.removeItem("tuhi.folderPinned");
-      }
+      if (folderRoot) localStorage.setItem("tuhi.lastDir", folderRoot);
     } catch {
       /* persistence is best-effort */
     }
-  }, [folderRoot, folderPinned]);
+  }, [folderRoot]);
 
   // Keep the active file scrolled into view in the tree when it or the layout changes.
   useEffect(() => {
@@ -829,18 +833,52 @@ function App() {
     if (findOpen) void runSearch(findQuery);
   }, [findQuery, useRegex, caseSensitive, findOpen, runSearch]);
 
-  // Restore any open tabs on mount (a fresh app has none).
+  // Session restore on mount. If the Rust process still has tabs (a dev hot-reload),
+  // adopt them. Otherwise (a real restart) reopen the files that were open last time,
+  // skipping any that have since moved or been deleted, and re-select the last active.
   useEffect(() => {
     void (async () => {
       try {
         const ts = await invoke<TabsState>("list_tabs");
-        if (ts.tabs.length) await applyTabsState(ts);
+        if (ts.tabs.length) {
+          await applyTabsState(ts);
+          return;
+        }
+        const { files, active } = savedSession;
+        if (!files.length) return;
+        const dark = window.matchMedia("(prefers-color-scheme: dark)").matches;
+        for (const p of files) {
+          try {
+            await invoke<TabsState>("open_document", { path: p, dark });
+          } catch {
+            /* skip a file that has moved or been deleted */
+          }
+        }
+        // Re-select the previously active file if it reopened, then apply + reveal.
+        const restored = await invoke<TabsState>("list_tabs");
+        if (!restored.tabs.length) return;
+        const want = restored.tabs.find((t) => t.path && t.path === active);
+        const applied = want ? await invoke<TabsState>("switch_tab", { id: want.id }) : restored;
+        await applyTabsState(applied);
+        if (applied.meta?.path) void revealInTree(applied.meta.path);
       } catch {
         /* ignore */
       }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Persist the open files + active file so the session can be restored next launch.
+  useEffect(() => {
+    try {
+      const files = tabs.map((t) => t.path).filter((p): p is string => !!p);
+      localStorage.setItem("tuhi.openFiles", JSON.stringify(files));
+      const active = tabs.find((t) => t.id === activeTabId)?.path ?? "";
+      localStorage.setItem("tuhi.activeFile", active);
+    } catch {
+      /* persistence is best-effort */
+    }
+  }, [tabs, activeTabId]);
 
   // Keyboard shortcuts owned by the front end. There is no native menu bar (Studio
   // leads with the rail + command palette); WebView2 also swallows browser combos,
