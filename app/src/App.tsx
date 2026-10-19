@@ -253,8 +253,9 @@ function App() {
     }
   });
 
-  // Studio chrome: file tree, outline, command palette.
-  const [treeOpen, setTreeOpen] = useState(false);
+  // Studio chrome: one left panel showing Files OR Outline (rail switches it), plus
+  // the command palette. `null` = the left panel is collapsed.
+  const [leftPanel, setLeftPanel] = useState<"files" | "outline" | null>("files");
   const [treeWidth, setTreeWidth] = useState<number>(() => {
     try {
       const w = Number(localStorage.getItem("tuhi.treeWidth"));
@@ -268,7 +269,6 @@ function App() {
   const [folderPinned, setFolderPinned] = useState(false);
   const [dirCache, setDirCache] = useState<Record<string, DirEntry[]>>({});
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
-  const [outlineOpen, setOutlineOpen] = useState(true);
   const [outline, setOutline] = useState<OutlineItem[]>([]);
   const [filterOpen, setFilterOpen] = useState(false);
   const [filterQuery, setFilterQuery] = useState("");
@@ -341,7 +341,6 @@ function App() {
         const kids = await invoke<DirEntry[]>("list_dir", { path: dir });
         setFolderRoot(dir);
         setDirCache((prev) => ({ ...prev, [dir]: kids }));
-        setTreeOpen(true);
       } catch {
         /* leave the tree as-is if the directory can't be listed */
       }
@@ -401,16 +400,16 @@ function App() {
       const r = root;
       setFolderRoot((cur) => cur ?? r);
       setDirCache((prev) => (r in prev ? prev : { ...prev, [r]: kids }));
-      setTreeOpen(true);
+      setLeftPanel("files");
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Keep the active file scrolled into view in the tree when it or the layout changes.
   useEffect(() => {
-    if (!treeOpen) return;
+    if (leftPanel !== "files") return;
     document.querySelector(".ft-row.file.active")?.scrollIntoView({ block: "nearest" });
-  }, [meta?.path, expanded, dirCache, treeOpen]);
+  }, [meta?.path, expanded, dirCache, leftPanel]);
   const [rangeStart, setRangeStart] = useState(0);
   const [windowBase, setWindowBase] = useState(0); // char index of rangeStart's line
   const [caret, setCaret] = useState<Caret | null>(null);
@@ -648,7 +647,7 @@ function App() {
       setFolderPinned(true);
       setDirCache({ [selected]: kids });
       setExpanded(new Set());
-      setTreeOpen(true);
+      setLeftPanel("files");
     } catch (e) {
       setError(String(e));
     }
@@ -1294,8 +1293,8 @@ function App() {
       ...(meta ? [{ label: "Filter lines to view…", kind: C, run: () => openFilter() }] : []),
       ...(meta?.path ? [{ label: followOn ? "Stop following file" : "Follow file (tail)", kind: C, run: () => toggleFollow() }] : []),
       { label: "Edit highlighters…", kind: C, run: () => setHlEditorOpen(true) },
-      { label: "Toggle file tree", kind: C, run: () => setTreeOpen((v) => !v) },
-      { label: "Toggle outline", kind: C, run: () => setOutlineOpen((v) => !v) },
+      { label: "Show files", kind: C, run: () => setLeftPanel((v) => (v === "files" ? null : "files")) },
+      ...(meta ? [{ label: "Show outline", kind: C, run: () => setLeftPanel((v) => (v === "outline" ? null : "outline")) }] : []),
       ...tabs.map((t) => ({ label: t.name, kind: "tab" as const, run: () => void switchTab(t.id) })),
       ...Object.values(dirCache)
         .flat()
@@ -1369,10 +1368,19 @@ function App() {
       </header>
       <div className="body">
       <nav className="rail">
-        <button className={`rail-btn${treeOpen ? " on" : ""}`} onClick={() => setTreeOpen((v) => !v)} title="Files">
+        <button
+          className={`rail-btn${leftPanel === "files" ? " on" : ""}`}
+          onClick={() => setLeftPanel((v) => (v === "files" ? null : "files"))}
+          title="Files"
+        >
           <IconTree />
         </button>
-        <button className={`rail-btn${outlineOpen ? " on" : ""}`} onClick={() => setOutlineOpen((v) => !v)} title="Outline">
+        <button
+          className={`rail-btn${leftPanel === "outline" ? " on" : ""}`}
+          onClick={() => setLeftPanel((v) => (v === "outline" ? null : "outline"))}
+          disabled={!meta}
+          title="Outline"
+        >
           <IconList />
         </button>
         <button
@@ -1395,24 +1403,48 @@ function App() {
           <IconCommand />
         </button>
       </nav>
-      {treeOpen && (
+      {leftPanel && (
         <aside className="filetree" style={{ flex: `0 0 ${treeWidth}px`, width: treeWidth }}>
-          <div className="ft-head">
-            <span className="ft-title" title={folderRoot ?? ""}>{folderRoot ? baseName(folderRoot) : "Explorer"}</span>
-            <span className="ft-sp" />
-            <button className="ft-icn" onClick={() => void handleOpen()} title="Open file (Ctrl+O)">
-              <IconOpen />
-            </button>
-            <button className="ft-icn" onClick={() => void openFolder()} title="Open folder…">
-              <IconFolder />
-            </button>
-          </div>
-          <div className="ft-body">
-            {folderRoot ? renderDir(folderRoot, 0) : <p className="ft-empty">Open a folder to browse files.</p>}
-          </div>
+          {leftPanel === "files" ? (
+            <>
+              <div className="ft-head">
+                <span className="ft-title" title={folderRoot ?? ""}>{folderRoot ? baseName(folderRoot) : "Explorer"}</span>
+                <span className="ft-sp" />
+                <button className="ft-icn" onClick={() => void handleOpen()} title="Open file (Ctrl+O)">
+                  <IconOpen />
+                </button>
+                <button className="ft-icn" onClick={() => void openFolder()} title="Open folder…">
+                  <IconFolder />
+                </button>
+              </div>
+              <div className="ft-body">
+                {folderRoot ? renderDir(folderRoot, 0) : <p className="ft-empty">Open a folder to browse files.</p>}
+              </div>
+            </>
+          ) : (
+            <>
+              <div className="op-head">Outline</div>
+              <div className="op-body">
+                {outline.length ? (
+                  outline.map((o, i) => (
+                    <div
+                      key={`${o.line}-${i}`}
+                      className={`op-row lvl${o.level}`}
+                      onClick={() => void jumpToLine(o.line)}
+                      title={o.title}
+                    >
+                      {o.title}
+                    </div>
+                  ))
+                ) : (
+                  <p className="op-empty">{meta ? "No headings" : "No file open"}</p>
+                )}
+              </div>
+            </>
+          )}
         </aside>
       )}
-      {treeOpen && (
+      {leftPanel && (
         <div
           className="ft-resizer"
           onMouseDown={startTreeResize}
@@ -1534,27 +1566,6 @@ function App() {
           </div>
         )}
       </div>
-      {outlineOpen && meta && (
-        <aside className="outline-panel">
-          <div className="op-head">Outline</div>
-          <div className="op-body">
-            {outline.length ? (
-              outline.map((o, i) => (
-                <div
-                  key={`${o.line}-${i}`}
-                  className={`op-row lvl${o.level}`}
-                  onClick={() => void jumpToLine(o.line)}
-                  title={o.title}
-                >
-                  {o.title}
-                </div>
-              ))
-            ) : (
-              <p className="op-empty">No headings</p>
-            )}
-          </div>
-        </aside>
-      )}
       {filterOpen && (
         <div className="filter-view">
           <div className="filter-bar">
