@@ -44,8 +44,18 @@ Once a week (more if volume needs it), clear `needs-triage`:
 
 ## Saved replies
 
-Set these up once in **GitHub → Settings → Saved replies**, then pick one and
-personalise the first line to what the person actually said.
+Two ways to keep replies consistent (GitHub has no API to *create* saved replies, so
+neither can be fully scripted into the web dropdown):
+
+- **From the terminal (recommended):** `scripts/triage.sh <issue#> <disposition> --note
+  "a personal first line"` posts the matching reply, applies the outcome label, removes
+  `needs-triage`, and closes where appropriate, in one command. Dispositions: `accepted`,
+  `backlog`, `needs-info`, `duplicate` (with `--dup <n>`), `wontfix-scope`,
+  `wontfix-vision`.
+- **From the web UI:** set these up once in **GitHub → Settings → Saved replies**, then
+  pick one and personalise the first line.
+
+The wording for both lives here:
 
 **Accepted**
 > Thanks for this, agreed, and I've added it to the roadmap. You can follow it on the
