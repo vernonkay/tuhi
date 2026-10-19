@@ -53,7 +53,11 @@ pub fn decode(bytes: &[u8]) -> Decoded {
         };
     }
     match std::str::from_utf8(bytes) {
-        Ok(s) => Decoded { text: s.to_owned(), encoding: Encoding::Utf8, bom: false },
+        Ok(s) => Decoded {
+            text: s.to_owned(),
+            encoding: Encoding::Utf8,
+            bom: false,
+        },
         Err(_) => Decoded {
             text: bytes.iter().map(|&b| b as char).collect(),
             encoding: Encoding::Latin1,
@@ -87,20 +91,32 @@ pub fn encode(text: &str, encoding: Encoding, bom: bool) -> Vec<u8> {
         }
         Encoding::Latin1 => text
             .chars()
-            .map(|c| if (c as u32) <= 0xFF { c as u32 as u8 } else { b'?' })
+            .map(|c| {
+                if (c as u32) <= 0xFF {
+                    c as u32 as u8
+                } else {
+                    b'?'
+                }
+            })
             .collect(),
     }
 }
 
 fn decode_utf16(bytes: &[u8], be: bool) -> String {
-    let units = bytes.chunks_exact(2).map(|c| {
-        if be {
-            u16::from_be_bytes([c[0], c[1]])
+    let mut units = Vec::with_capacity(bytes.len() / 2);
+    let mut i = 0;
+    while i + 1 < bytes.len() {
+        let pair = [bytes[i], bytes[i + 1]];
+        units.push(if be {
+            u16::from_be_bytes(pair)
         } else {
-            u16::from_le_bytes([c[0], c[1]])
-        }
-    });
-    char::decode_utf16(units).map(|r| r.unwrap_or('\u{FFFD}')).collect()
+            u16::from_le_bytes(pair)
+        });
+        i += 2;
+    }
+    char::decode_utf16(units)
+        .map(|r| r.unwrap_or('\u{FFFD}'))
+        .collect()
 }
 
 #[cfg(test)]

@@ -36,7 +36,12 @@ struct Engine {
 }
 
 fn rgb(hex: u32) -> Color {
-    Color { r: (hex >> 16) as u8, g: (hex >> 8) as u8, b: hex as u8, a: 0xff }
+    Color {
+        r: (hex >> 16) as u8,
+        g: (hex >> 8) as u8,
+        b: hex as u8,
+        a: 0xff,
+    }
 }
 
 fn engine() -> &'static Engine {
@@ -133,7 +138,11 @@ fn engine() -> &'static Engine {
             ],
         );
 
-        Engine { syntaxes, light, dark }
+        Engine {
+            syntaxes,
+            light,
+            dark,
+        }
     })
 }
 
@@ -142,10 +151,10 @@ fn engine() -> &'static Engine {
 /// Returns `None` when no syntax matches, so the caller leaves the document plain.
 pub fn highlight_doc(text: &str, ext: &str, dark: bool) -> Option<Vec<Vec<Span>>> {
     let eng = engine();
-    let syntax = eng
-        .syntaxes
-        .find_syntax_by_extension(ext)
-        .or_else(|| eng.syntaxes.find_syntax_by_first_line(text.lines().next().unwrap_or("")))?;
+    let syntax = eng.syntaxes.find_syntax_by_extension(ext).or_else(|| {
+        eng.syntaxes
+            .find_syntax_by_first_line(text.lines().next().unwrap_or(""))
+    })?;
 
     let theme = if dark { &eng.dark } else { &eng.light };
     let mut hl = HighlightLines::new(syntax, theme);

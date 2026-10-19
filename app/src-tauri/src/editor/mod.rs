@@ -29,7 +29,7 @@ mod mmapbuf;
 mod search;
 use encoding::Encoding;
 use error::EditorError;
-use highlight::{Span, HIGHLIGHT_MAX_BYTES};
+use highlight::{HIGHLIGHT_MAX_BYTES, Span};
 use search::build_regex;
 
 /// Lightweight document summary returned to the UI (never the whole text).
@@ -118,7 +118,12 @@ pub trait Buffer: Send {
     /// The text in the character range `[start, end)` (for copy/cut).
     fn read_range(&self, start: usize, end: usize) -> Result<String, EditorError>;
     /// Find all matches; returns character ranges `[start, end)`.
-    fn search(&self, query: &str, use_regex: bool, case_sensitive: bool) -> Result<Vec<[usize; 2]>, EditorError>;
+    fn search(
+        &self,
+        query: &str,
+        use_regex: bool,
+        case_sensitive: bool,
+    ) -> Result<Vec<[usize; 2]>, EditorError>;
     /// Replace every match; returns the new document meta and the number replaced.
     fn replace_all(
         &mut self,
@@ -386,7 +391,10 @@ impl Buffer for RopeBuffer {
 
     fn insert(&mut self, char_idx: usize, text: &str) -> Result<DocumentMeta, EditorError> {
         if char_idx > self.rope.len_chars() {
-            return Err(EditorError::IndexOutOfRange { idx: char_idx, len: self.rope.len_chars() });
+            return Err(EditorError::IndexOutOfRange {
+                idx: char_idx,
+                len: self.rope.len_chars(),
+            });
         }
         if text.is_empty() {
             return Ok(self.make_meta());
@@ -411,7 +419,11 @@ impl Buffer for RopeBuffer {
             _ => false,
         };
         if !coalesced {
-            self.push_undo(Change { at: char_idx, removed: String::new(), inserted: text.to_string() });
+            self.push_undo(Change {
+                at: char_idx,
+                removed: String::new(),
+                inserted: text.to_string(),
+            });
         }
         Ok(self.make_meta())
     }
@@ -427,7 +439,11 @@ impl Buffer for RopeBuffer {
         self.rope.remove(start..end);
         self.dirty = true;
         self.redo_stack.clear();
-        self.push_undo(Change { at: start, removed, inserted: String::new() });
+        self.push_undo(Change {
+            at: start,
+            removed,
+            inserted: String::new(),
+        });
         Ok(self.make_meta())
     }
 
@@ -446,12 +462,18 @@ impl Buffer for RopeBuffer {
             Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
             _ => PathBuf::from("."),
         };
-        let file_name = target_path.file_name().and_then(|n| n.to_str()).unwrap_or("tuhi");
+        let file_name = target_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("tuhi");
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_nanos())
             .unwrap_or(0);
-        let tmp_path = dir.join(format!(".{file_name}.tuhi-tmp-{}-{nanos}", std::process::id()));
+        let tmp_path = dir.join(format!(
+            ".{file_name}.tuhi-tmp-{}-{nanos}",
+            std::process::id()
+        ));
 
         // Write the rope to the temp file and fsync before the rename, re-encoding to
         // the file's original encoding/BOM. Plain UTF-8 (the common case) streams
@@ -465,11 +487,15 @@ impl Buffer for RopeBuffer {
                 w.write_all(&bytes)?;
             }
             w.flush()?;
-            w.into_inner().map_err(io::IntoInnerError::into_error)?.sync_all()
+            w.into_inner()
+                .map_err(io::IntoInnerError::into_error)?
+                .sync_all()
         };
         if let Err(e) = write() {
             let _ = fs::remove_file(&tmp_path);
-            return Err(EditorError::Other(format!("save failed, original left intact: {e}")));
+            return Err(EditorError::Other(format!(
+                "save failed, original left intact: {e}"
+            )));
         }
 
         // Carry the existing file's permissions across the replace (best effort).
@@ -479,7 +505,9 @@ impl Buffer for RopeBuffer {
 
         if let Err(e) = fs::rename(&tmp_path, &target_path) {
             let _ = fs::remove_file(&tmp_path);
-            return Err(EditorError::Other(format!("save failed on rename, original left intact: {e}")));
+            return Err(EditorError::Other(format!(
+                "save failed on rename, original left intact: {e}"
+            )));
         }
 
         self.path = Some(target_path);
@@ -523,7 +551,12 @@ impl Buffer for RopeBuffer {
         Ok(self.rope.slice(start..end).to_string())
     }
 
-    fn search(&self, query: &str, use_regex: bool, case_sensitive: bool) -> Result<Vec<[usize; 2]>, EditorError> {
+    fn search(
+        &self,
+        query: &str,
+        use_regex: bool,
+        case_sensitive: bool,
+    ) -> Result<Vec<[usize; 2]>, EditorError> {
         if query.is_empty() {
             return Ok(Vec::new());
         }
@@ -534,7 +567,10 @@ impl Buffer for RopeBuffer {
             if m.start() == m.end() {
                 continue; // skip empty matches (e.g. a lone `.*`)
             }
-            out.push([self.rope.byte_to_char(m.start()), self.rope.byte_to_char(m.end())]);
+            out.push([
+                self.rope.byte_to_char(m.start()),
+                self.rope.byte_to_char(m.end()),
+            ]);
             if out.len() >= 10_000 {
                 break; // cap the payload
             }
@@ -560,11 +596,16 @@ impl Buffer for RopeBuffer {
             let new = if use_regex {
                 re.replace_all(&text, replacement).into_owned()
             } else {
-                re.replace_all(&text, regex::NoExpand(replacement)).into_owned()
+                re.replace_all(&text, regex::NoExpand(replacement))
+                    .into_owned()
             };
             self.redo_stack.clear();
             // One undo step for the whole replace-all (stores the before/after text).
-            self.push_undo(Change { at: 0, removed: text, inserted: new.clone() });
+            self.push_undo(Change {
+                at: 0,
+                removed: text,
+                inserted: new.clone(),
+            });
             self.rope = Rope::from_str(&new);
             self.dirty = true;
             self.rehighlight();
@@ -582,17 +623,34 @@ impl Buffer for RopeBuffer {
     fn rehighlight(&mut self) {
         if self.rope.len_bytes() <= HIGHLIGHT_MAX_BYTES && !self.ext.is_empty() {
             let text = self.rope.to_string();
-            self.highlights = highlight::highlight_doc(&text, &self.ext, self.dark).unwrap_or_default();
+            self.highlights =
+                highlight::highlight_doc(&text, &self.ext, self.dark).unwrap_or_default();
         } else {
             self.highlights = Vec::new();
         }
     }
 
     fn outline(&self) -> Vec<OutlineItem> {
-        let is_md = matches!(self.ext.as_str(), "md" | "markdown" | "mdown" | "mkd" | "markdn");
+        let is_md = matches!(
+            self.ext.as_str(),
+            "md" | "markdown" | "mdown" | "mkd" | "markdn"
+        );
         const CODE_STARTS: [&str; 15] = [
-            "pub fn ", "fn ", "pub struct ", "struct ", "pub enum ", "enum ", "impl ",
-            "pub trait ", "trait ", "pub mod ", "mod ", "class ", "function ", "def ", "export ",
+            "pub fn ",
+            "fn ",
+            "pub struct ",
+            "struct ",
+            "pub enum ",
+            "enum ",
+            "impl ",
+            "pub trait ",
+            "trait ",
+            "pub mod ",
+            "mod ",
+            "class ",
+            "function ",
+            "def ",
+            "export ",
         ];
         let mut out = Vec::new();
         for i in 0..self.rope.len_lines() {
@@ -610,11 +668,21 @@ impl Buffer for RopeBuffer {
                 if (1..=6).contains(&hashes) && t.chars().nth(hashes) == Some(' ') {
                     let title = t[hashes..].trim().trim_end_matches('#').trim().to_string();
                     if !title.is_empty() {
-                        out.push(OutlineItem { level: hashes as u8, title, line: i });
+                        out.push(OutlineItem {
+                            level: hashes as u8,
+                            title,
+                            line: i,
+                        });
                     }
                 }
             } else if CODE_STARTS.iter().any(|p| t.starts_with(p)) {
-                let title: String = t.trim_end().trim_end_matches('{').trim().chars().take(80).collect();
+                let title: String = t
+                    .trim_end()
+                    .trim_end_matches('{')
+                    .trim()
+                    .chars()
+                    .take(80)
+                    .collect();
                 if !title.is_empty() {
                     // Nest by indentation (tab = 4 cols), so e.g. methods sit under their
                     // impl/mod. One indent step per ~4 columns, capped at 6 levels.
@@ -624,7 +692,11 @@ impl Buffer for RopeBuffer {
                         .map(|c| if c == '\t' { 4 } else { 1 })
                         .sum();
                     let level = (1 + indent / 4).min(6) as u8;
-                    out.push(OutlineItem { level, title, line: i });
+                    out.push(OutlineItem {
+                        level,
+                        title,
+                        line: i,
+                    });
                 }
             }
         }
@@ -671,7 +743,11 @@ impl Buffer for RopeBuffer {
             return Ok(self.make_meta());
         }
         self.redo_stack.clear();
-        self.push_undo(Change { at: 0, removed: old, inserted: text.to_string() });
+        self.push_undo(Change {
+            at: 0,
+            removed: old,
+            inserted: text.to_string(),
+        });
         self.rope = Rope::from_str(text);
         self.dirty = true;
         self.rehighlight();
@@ -700,7 +776,11 @@ impl Buffer for RopeBuffer {
                 } else {
                     s
                 };
-                out.push(FilterMatch { line: i, text, truncated });
+                out.push(FilterMatch {
+                    line: i,
+                    text,
+                    truncated,
+                });
                 if out.len() >= MAX_FILTER_MATCHES {
                     break;
                 }
@@ -758,7 +838,11 @@ pub fn open_document(
 
 #[tauri::command]
 pub fn list_tabs(state: State<EditorState>) -> Result<TabsState, EditorError> {
-    Ok(state.0.lock().map_err(|_| EditorError::LockPoisoned)?.tabs_state())
+    Ok(state
+        .0
+        .lock()
+        .map_err(|_| EditorError::LockPoisoned)?
+        .tabs_state())
 }
 
 #[tauri::command]
@@ -795,7 +879,12 @@ pub fn get_viewport(
     count: usize,
     state: State<EditorState>,
 ) -> Result<Vec<ViewportLine>, EditorError> {
-    state.0.lock().map_err(|_| EditorError::LockPoisoned)?.active_buffer()?.viewport(start, count)
+    state
+        .0
+        .lock()
+        .map_err(|_| EditorError::LockPoisoned)?
+        .active_buffer()?
+        .viewport(start, count)
 }
 
 #[tauri::command]
@@ -804,7 +893,12 @@ pub fn insert_text(
     text: String,
     state: State<EditorState>,
 ) -> Result<DocumentMeta, EditorError> {
-    state.0.lock().map_err(|_| EditorError::LockPoisoned)?.active_buffer_mut()?.insert(char_idx, &text)
+    state
+        .0
+        .lock()
+        .map_err(|_| EditorError::LockPoisoned)?
+        .active_buffer_mut()?
+        .insert(char_idx, &text)
 }
 
 #[tauri::command]
@@ -813,7 +907,12 @@ pub fn delete_range(
     end: usize,
     state: State<EditorState>,
 ) -> Result<DocumentMeta, EditorError> {
-    state.0.lock().map_err(|_| EditorError::LockPoisoned)?.active_buffer_mut()?.delete(start, end)
+    state
+        .0
+        .lock()
+        .map_err(|_| EditorError::LockPoisoned)?
+        .active_buffer_mut()?
+        .delete(start, end)
 }
 
 #[tauri::command]
@@ -821,7 +920,12 @@ pub fn save_document(
     path: Option<String>,
     state: State<EditorState>,
 ) -> Result<DocumentMeta, EditorError> {
-    state.0.lock().map_err(|_| EditorError::LockPoisoned)?.active_buffer_mut()?.save(path)
+    state
+        .0
+        .lock()
+        .map_err(|_| EditorError::LockPoisoned)?
+        .active_buffer_mut()?
+        .save(path)
 }
 
 /// Document meta after an undo/redo, plus where the caret should land (`None` when
@@ -837,7 +941,10 @@ pub fn undo(state: State<EditorState>) -> Result<EditOutcome, EditorError> {
     let mut reg = state.0.lock().map_err(|_| EditorError::LockPoisoned)?;
     let b = reg.active_buffer_mut()?;
     let caret = b.undo()?;
-    Ok(EditOutcome { meta: b.meta(), caret })
+    Ok(EditOutcome {
+        meta: b.meta(),
+        caret,
+    })
 }
 
 #[tauri::command]
@@ -845,7 +952,10 @@ pub fn redo(state: State<EditorState>) -> Result<EditOutcome, EditorError> {
     let mut reg = state.0.lock().map_err(|_| EditorError::LockPoisoned)?;
     let b = reg.active_buffer_mut()?;
     let caret = b.redo()?;
-    Ok(EditOutcome { meta: b.meta(), caret })
+    Ok(EditOutcome {
+        meta: b.meta(),
+        caret,
+    })
 }
 
 /// Reformat the active document's JSON with indentation (pretty-print), in one
@@ -865,18 +975,41 @@ pub fn pretty_print(state: State<EditorState>) -> Result<DocumentMeta, EditorErr
 }
 
 #[tauri::command]
-pub fn pos_to_char(line: usize, col: usize, state: State<EditorState>) -> Result<usize, EditorError> {
-    Ok(state.0.lock().map_err(|_| EditorError::LockPoisoned)?.active_buffer()?.pos_to_char(line, col))
+pub fn pos_to_char(
+    line: usize,
+    col: usize,
+    state: State<EditorState>,
+) -> Result<usize, EditorError> {
+    Ok(state
+        .0
+        .lock()
+        .map_err(|_| EditorError::LockPoisoned)?
+        .active_buffer()?
+        .pos_to_char(line, col))
 }
 
 #[tauri::command]
 pub fn char_to_pos(char_idx: usize, state: State<EditorState>) -> Result<CaretPos, EditorError> {
-    Ok(state.0.lock().map_err(|_| EditorError::LockPoisoned)?.active_buffer()?.char_to_pos(char_idx))
+    Ok(state
+        .0
+        .lock()
+        .map_err(|_| EditorError::LockPoisoned)?
+        .active_buffer()?
+        .char_to_pos(char_idx))
 }
 
 #[tauri::command]
-pub fn read_range(start: usize, end: usize, state: State<EditorState>) -> Result<String, EditorError> {
-    state.0.lock().map_err(|_| EditorError::LockPoisoned)?.active_buffer()?.read_range(start, end)
+pub fn read_range(
+    start: usize,
+    end: usize,
+    state: State<EditorState>,
+) -> Result<String, EditorError> {
+    state
+        .0
+        .lock()
+        .map_err(|_| EditorError::LockPoisoned)?
+        .active_buffer()?
+        .read_range(start, end)
 }
 
 #[tauri::command]
@@ -886,7 +1019,12 @@ pub fn search(
     case_sensitive: bool,
     state: State<EditorState>,
 ) -> Result<Vec<[usize; 2]>, EditorError> {
-    state.0.lock().map_err(|_| EditorError::LockPoisoned)?.active_buffer()?.search(&query, use_regex, case_sensitive)
+    state
+        .0
+        .lock()
+        .map_err(|_| EditorError::LockPoisoned)?
+        .active_buffer()?
+        .search(&query, use_regex, case_sensitive)
 }
 
 #[derive(Serialize)]
@@ -936,7 +1074,10 @@ pub fn reload(dark: bool, state: State<EditorState>) -> Result<DocumentMeta, Edi
     let mut buffer: Box<dyn Buffer> = if size >= mmapbuf::MMAP_THRESHOLD_BYTES {
         Box::new(mmapbuf::MmapBuffer::default())
     } else {
-        Box::new(RopeBuffer { dark, ..Default::default() })
+        Box::new(RopeBuffer {
+            dark,
+            ..Default::default()
+        })
     };
     buffer.open(&path)?;
     let meta = buffer.meta();
@@ -975,7 +1116,11 @@ pub fn list_dir(path: String) -> Result<Vec<DirEntry>, EditorError> {
             continue;
         }
         let is_dir = e.file_type().map(|f| f.is_dir()).unwrap_or(false);
-        entries.push(DirEntry { name, path: e.path().display().to_string(), is_dir });
+        entries.push(DirEntry {
+            name,
+            path: e.path().display().to_string(),
+            is_dir,
+        });
     }
     // Folders first, then case-insensitive by name.
     entries.sort_by(|a, b| {
@@ -998,7 +1143,12 @@ pub fn home_dir() -> Option<String> {
 /// The active document's outline for the outline panel.
 #[tauri::command]
 pub fn get_outline(state: State<EditorState>) -> Result<Vec<OutlineItem>, EditorError> {
-    Ok(state.0.lock().map_err(|_| EditorError::LockPoisoned)?.active_buffer()?.outline())
+    Ok(state
+        .0
+        .lock()
+        .map_err(|_| EditorError::LockPoisoned)?
+        .active_buffer()?
+        .outline())
 }
 
 #[tauri::command]
@@ -1058,7 +1208,10 @@ mod tests {
                 .unwrap_or_else(|| panic!("no syntax for .{ext}"));
             let colours: std::collections::HashSet<_> =
                 spans.iter().flatten().map(|s| s.color.clone()).collect();
-            assert!(colours.len() > 1, ".{ext} produced only one colour: {colours:?}");
+            assert!(
+                colours.len() > 1,
+                ".{ext} produced only one colour: {colours:?}"
+            );
         }
     }
 
@@ -1111,7 +1264,10 @@ mod tests {
 
     // A unique path in the temp dir for a save test (no tempfile crate dependency).
     fn tmp_target(tag: &str) -> PathBuf {
-        let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
         std::env::temp_dir().join(format!("tuhi-{tag}-{}-{nanos}", std::process::id()))
     }
 
@@ -1142,9 +1298,15 @@ mod tests {
         // Overwrite in place: the rename replaces the original.
         b.insert(b.rope.len_chars(), "second line\n").unwrap();
         b.save(Some(p.clone())).unwrap();
-        assert_eq!(fs::read_to_string(&path).unwrap(), "first version\nsecond line\n");
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "first version\nsecond line\n"
+        );
 
-        assert!(temp_leftovers(&dir, &base).is_empty(), "temp files left behind");
+        assert!(
+            temp_leftovers(&dir, &base).is_empty(),
+            "temp files left behind"
+        );
         let _ = fs::remove_file(&path);
     }
 
@@ -1181,8 +1343,14 @@ mod tests {
         let res = b.save(Some(sub.display().to_string()));
 
         assert!(res.is_err(), "saving onto a directory should fail");
-        assert!(sub.is_dir(), "the original must still be there after a failed save");
-        assert!(temp_leftovers(&dir, &base).is_empty(), "temp files left behind");
+        assert!(
+            sub.is_dir(),
+            "the original must still be there after a failed save"
+        );
+        assert!(
+            temp_leftovers(&dir, &base).is_empty(),
+            "temp files left behind"
+        );
         let _ = fs::remove_dir(&sub);
     }
 

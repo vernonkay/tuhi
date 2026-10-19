@@ -7,7 +7,9 @@
 //! RAM) cannot. Editing on this engine (the full piece tree) is the next step;
 //! for now it is read-only, and the UI reflects that.
 
-use super::{Buffer, CaretPos, DocumentMeta, EditorError, FilterMatch, ViewportLine, MAX_VIEWPORT_LINE};
+use super::{
+    Buffer, CaretPos, DocumentMeta, EditorError, FilterMatch, MAX_VIEWPORT_LINE, ViewportLine,
+};
 use memmap2::Mmap;
 use std::fs::File;
 use std::path::PathBuf;
@@ -83,7 +85,11 @@ impl Buffer for MmapBuffer {
         let lines = (start..end)
             .map(|i| {
                 let a = self.line_starts[i];
-                let b = self.line_starts.get(i + 1).copied().unwrap_or(self.len_bytes);
+                let b = self
+                    .line_starts
+                    .get(i + 1)
+                    .copied()
+                    .unwrap_or(self.len_bytes);
                 let b = b.min(self.len_bytes).max(a);
                 let raw = &bytes[a..b];
                 let over_bytes = raw.len() > max_bytes;
@@ -133,7 +139,9 @@ impl Buffer for MmapBuffer {
         _regex: bool,
         _case_sensitive: bool,
     ) -> Result<Vec<[usize; 2]>, EditorError> {
-        Err(EditorError::Other("find is not available in large-file mode yet".into()))
+        Err(EditorError::Other(
+            "find is not available in large-file mode yet".into(),
+        ))
     }
     fn read_range(&self, _start: usize, _end: usize) -> Result<String, EditorError> {
         Err(EditorError::ReadOnly)
@@ -153,8 +161,8 @@ impl Buffer for MmapBuffer {
             Some(m) => &m[..],
             None => return Ok(Vec::new()),
         };
-        let re =
-            super::search::build_regex(query, use_regex, case_sensitive).map_err(EditorError::Regex)?;
+        let re = super::search::build_regex(query, use_regex, case_sensitive)
+            .map_err(EditorError::Regex)?;
         let mut out = Vec::new();
         for i in 0..self.line_starts.len() {
             let a = self.line_starts[i];
@@ -173,7 +181,11 @@ impl Buffer for MmapBuffer {
                 } else {
                     s.into_owned()
                 };
-                out.push(FilterMatch { line: i, text, truncated });
+                out.push(FilterMatch {
+                    line: i,
+                    text,
+                    truncated,
+                });
                 if out.len() >= super::MAX_FILTER_MATCHES {
                     break;
                 }
