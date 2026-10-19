@@ -24,6 +24,7 @@ pub fn run() {
             editor::save_document,
             editor::undo,
             editor::redo,
+            editor::pretty_print,
             editor::pos_to_char,
             editor::char_to_pos,
             editor::read_range,

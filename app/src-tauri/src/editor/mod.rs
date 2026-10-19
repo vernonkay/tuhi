@@ -134,6 +134,14 @@ pub trait Buffer: Send {
     fn redo(&mut self) -> Result<Option<usize>, EditorError> {
         Ok(None)
     }
+    /// The whole document as a string (empty where the engine can't, e.g. mmap).
+    fn text(&self) -> String {
+        String::new()
+    }
+    /// Replace the whole document in one undoable step (read-only engines refuse).
+    fn replace_document(&mut self, _text: &str) -> Result<DocumentMeta, EditorError> {
+        Err(EditorError::ReadOnly)
+    }
 }
 
 /// One open document (a tab).
@@ -623,6 +631,23 @@ impl Buffer for RopeBuffer {
         self.rehighlight();
         Ok(Some(caret))
     }
+
+    fn text(&self) -> String {
+        self.rope.to_string()
+    }
+
+    fn replace_document(&mut self, text: &str) -> Result<DocumentMeta, EditorError> {
+        let old = self.rope.to_string();
+        if old == text {
+            return Ok(self.make_meta());
+        }
+        self.redo_stack.clear();
+        self.push_undo(Change { at: 0, removed: old, inserted: text.to_string() });
+        self.rope = Rope::from_str(text);
+        self.dirty = true;
+        self.rehighlight();
+        Ok(self.make_meta())
+    }
 }
 
 // Tauri commands — thin delegations to the active buffer behind the mutex.
@@ -761,6 +786,22 @@ pub fn redo(state: State<EditorState>) -> Result<EditOutcome, EditorError> {
     let b = reg.active_buffer_mut()?;
     let caret = b.redo()?;
     Ok(EditOutcome { meta: b.meta(), caret })
+}
+
+/// Reformat the active document's JSON with indentation (pretty-print), in one
+/// undoable step. Fails if it is not valid JSON or the buffer is read-only (a
+/// large file on the mmap engine). Opening a minified blob never hangs, because the
+/// viewport caps line length; this makes it readable.
+#[tauri::command]
+pub fn pretty_print(state: State<EditorState>) -> Result<DocumentMeta, EditorError> {
+    let mut reg = state.0.lock().map_err(|_| EditorError::LockPoisoned)?;
+    let b = reg.active_buffer_mut()?;
+    let text = b.text();
+    let value: serde_json::Value = serde_json::from_str(text.trim())
+        .map_err(|e| EditorError::Other(format!("not valid JSON: {e}")))?;
+    let pretty =
+        serde_json::to_string_pretty(&value).map_err(|e| EditorError::Other(e.to_string()))?;
+    b.replace_document(&pretty)
 }
 
 #[tauri::command]
@@ -1088,6 +1129,22 @@ mod tests {
     }
 
     #[test]
+    fn replace_document_pretty_prints_and_undoes() {
+        let mut b = RopeBuffer::default();
+        let minified = "{\"a\":1,\"b\":[2,3]}";
+        b.insert(0, minified).unwrap();
+        // The command's core: parse JSON, pretty-print, replace the document.
+        let value: serde_json::Value = serde_json::from_str(b.text().trim()).unwrap();
+        let pretty = serde_json::to_string_pretty(&value).unwrap();
+        b.replace_document(&pretty).unwrap();
+        assert!(b.rope.to_string().starts_with("{\n"), "should be indented");
+        assert!(b.rope.len_lines() > 1);
+        // One undo restores the original minified text.
+        b.undo().unwrap();
+        assert_eq!(b.rope.to_string(), minified);
+    }
+
+    #[test]
     fn a_new_edit_clears_the_redo_stack() {
         let mut b = RopeBuffer::default();
         b.insert(0, "abc").unwrap();
@@ -1097,5 +1154,57 @@ mod tests {
         b.insert(0, "x").unwrap();
         assert_eq!(b.redo().unwrap(), None);
         assert_eq!(b.rope.to_string(), "x");
+    }
+
+    #[test]
+    fn empty_document_operations_are_safe() {
+        let mut b = RopeBuffer::default();
+        let vp = b.viewport(0, 10).unwrap();
+        assert_eq!(vp.len(), 1); // an empty rope is one empty line
+        assert_eq!(vp[0].text, "");
+        assert_eq!(b.pos_to_char(0, 0), 0);
+        assert_eq!(b.pos_to_char(5, 5), 0); // clamps past the end
+        let p = b.char_to_pos(0);
+        assert_eq!((p.line, p.col), (0, 0));
+        assert!(b.delete(0, 0).is_ok()); // no-op delete
+        assert!(b.read_range(0, 0).unwrap().is_empty());
+    }
+
+    #[test]
+    fn crlf_lines_and_caret_clamp() {
+        let mut b = RopeBuffer::default();
+        b.insert(0, "a\r\nb\r\n").unwrap();
+        assert_eq!(b.rope.len_lines(), 3); // "a\r\n", "b\r\n", ""
+        // A column past the end of line 0 clamps before the \r\n (after "a").
+        assert_eq!(b.pos_to_char(0, 100), 1);
+        // Line 1 starts after "a\r\n" (3 chars).
+        assert_eq!(b.pos_to_char(1, 0), 3);
+    }
+
+    #[test]
+    fn astral_chars_count_as_one_char() {
+        let mut b = RopeBuffer::default();
+        b.insert(0, "a😀b").unwrap(); // the emoji is one Unicode scalar == one ropey char
+        assert_eq!(b.rope.len_chars(), 3);
+        let p = b.char_to_pos(2);
+        assert_eq!((p.line, p.col), (0, 2));
+        b.delete(1, 2).unwrap(); // remove just the emoji
+        assert_eq!(b.rope.to_string(), "ab");
+    }
+
+    #[test]
+    fn many_edits_then_full_undo_terminates() {
+        let mut b = RopeBuffer::default();
+        for i in 0..200 {
+            let at = b.rope.len_chars();
+            b.insert(at, if i % 20 == 19 { "\n" } else { "x" }).unwrap();
+        }
+        assert_eq!(b.rope.len_chars(), 200);
+        let mut guard = 0;
+        while b.undo().unwrap().is_some() {
+            guard += 1;
+            assert!(guard < 1000, "undo did not terminate");
+        }
+        assert_eq!(b.rope.to_string(), "");
     }
 }

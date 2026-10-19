@@ -662,6 +662,20 @@ function App() {
     [meta, readonly, setCaretFromIdx],
   );
 
+  // Pretty-print the document's JSON (handy for minified blobs, which open without
+  // hanging thanks to the viewport's line cap, but are unreadable until reflowed).
+  const formatJson = useCallback(async () => {
+    if (!meta || readonly) return;
+    try {
+      setMeta(await invoke<DocumentMeta>("pretty_print"));
+      setAnchor(null);
+      await setCaretFromIdx(0);
+      scrollerRef.current?.focus();
+    } catch (e) {
+      setError(String(e));
+    }
+  }, [meta, readonly, setCaretFromIdx]);
+
   // --- Editing. Every op goes through the char-indexed Rust buffer. ---
 
   const insertText = useCallback(
@@ -1113,6 +1127,7 @@ function App() {
       { label: "Open Folder…", kind: C, run: () => void openFolder() },
       ...(meta ? [{ label: "Save", hint: combo("S"), kind: C, run: () => void handleSave() }] : []),
       ...(meta && !readonly ? [{ label: "Find in file…", hint: combo("F"), kind: C, run: () => openFind(false) }] : []),
+      ...(meta && !readonly ? [{ label: "Format JSON (pretty-print)", kind: C, run: () => void formatJson() }] : []),
       { label: "Toggle file tree", kind: C, run: () => setTreeOpen((v) => !v) },
       { label: "Toggle outline", kind: C, run: () => setOutlineOpen((v) => !v) },
       ...tabs.map((t) => ({ label: t.name, kind: "tab" as const, run: () => void switchTab(t.id) })),
@@ -1360,11 +1375,6 @@ function App() {
         <span className="path">{meta?.path ?? "No file"}</span>
         {readonly && <span className="badge-ro">read-only · large file</span>}
         <span className="spacer" />
-        {meta && !readonly && (
-          <span className="pos" title="syntax spans in view (diagnostic)">
-            hl {lines.reduce((n, l) => n + l.spans.length, 0)}
-          </span>
-        )}
         {caret && <span className="pos">Ln {caret.line + 1}, Col {caret.col + 1}</span>}
         {meta && (
           <span className="counts">
