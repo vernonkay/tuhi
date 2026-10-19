@@ -83,6 +83,15 @@ html, body, #root {
   border-right: 1px solid var(--border);
   min-width: 0;
 }
+/* Drag handle on the tree's right edge to resize the panel. */
+.ft-resizer {
+  flex: 0 0 5px;
+  margin-left: -3px;
+  cursor: col-resize;
+  background: transparent;
+  z-index: 3;
+}
+.ft-resizer:hover { background: var(--coral-soft); }
 .ft-head {
   display: flex;
   align-items: center;
