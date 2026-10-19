@@ -24,8 +24,11 @@ Notepad++ rebuilt portable and modern, without becoming an IDE or a knowledge-ba
 
 ## Demo
 
-A short demo GIF is coming: open a multi-GB log, filter to `ERROR`, follow it live with
-red highlights, then pretty-print a minified JSON file, all instantly.
+![tuhi: open a 2 GB log, filter to ERROR, follow it live, then pretty-print minified JSON](docs/hero.gif)
+
+Open a multi-GB log with flat memory, filter to `ERROR` instantly, follow it live with
+colour highlights, then pretty-print a minified JSON blob, all without the file ever
+loading into the view.
 
 ## Install
 
@@ -61,7 +64,13 @@ No `just`? The recipes just wrap `npm` in `app/` (`cd app && npm install`, then
 ## Status & roadmap
 
 0.1.0 is the first public release. What's next (Markdown mode, viewport highlighting,
-editable large files, and more) is in [`ROADMAP.md`](ROADMAP.md).
+editable large files, and more) is on the [public roadmap board][board] and in
+[`ROADMAP.md`](ROADMAP.md). Ideas and bugs are very welcome, come to
+[Discussions][discussions] for ideas and questions, or open an [issue][issues].
+
+[board]: https://github.com/users/vernonkay/projects/1
+[discussions]: https://github.com/vernonkay/tuhi/discussions
+[issues]: https://github.com/vernonkay/tuhi/issues
 
 ## Contributing
 
