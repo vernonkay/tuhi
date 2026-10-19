@@ -1,8 +1,8 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 360 120" role="img" aria-label="Tuhi logo">
-  <title>Tuhi</title>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 360 120" role="img" aria-label="tuhi logo">
+  <title>tuhi</title>
   <!-- Logomark: a caret (insertion cursor / "write here" mark) over a written line -->
   <g fill="none" stroke-linecap="round" stroke-linejoin="round">
-    <path d="M22 60 L48 28 L74 60" stroke="#3D6DF6" stroke-width="13"/>
+    <path d="M22 60 L48 28 L74 60" stroke="#F2502B" stroke-width="13"/>
     <path d="M22 86 H74" stroke="#15181E" stroke-width="11"/>
   </g>
   <!-- Wordmark (draft: system sans; final should be outlined to paths) -->

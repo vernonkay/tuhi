@@ -1,7 +1,7 @@
-# ADR 0002 (Proposed) — The editing core
+# ADR 0002 — The editing core
 
-- Status: **Accepted — Option B (Rust rope engine), chosen by Vernon 2026-10-18.** This is the call that most shapes the project.
-- Date: 2026-10-18
+- Status: **Accepted — Option B (Rust editing core + viewport rendering), chosen by Vernon 2026-10-18.** The high-level decision (Rust core, web-view renders only the viewport) stands. **The specific buffer choice below — an in-memory `ropey` rope — was superseded on 2026-10-19 by ADR-0003**, after a probe showed `ropey` is RAM-bounded (resident ≈1.16× file size, no memory-mapping) and so cannot meet the multi-GB promise this ADR used to justify it. ADR-0003 replaces the buffer with a piece tree over a memory-mapped original (keeping `ropey` as a fallback impl behind a `Buffer` trait). Read this ADR for *why a Rust core*, and ADR-0003 for *what the buffer now is*.
+- Date: 2026-10-18 (superseded in part 2026-10-19)
 
 ## Why this is the pivotal decision
 

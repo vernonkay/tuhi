@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Tuhi",
+  "productName": "tuhi",
   "version": "0.1.0",
   "identifier": "com.vernonk.tuhi",
   "build": {
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "Tuhi",
+        "title": "tuhi",
         "width": 800,
         "height": 600
       }

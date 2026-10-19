@@ -1,11 +1,17 @@
-//! Editing core (Option B — see docs/decisions/0002).
+//! Editing core.
 //!
-//! The text buffer lives here in Rust, backed by a `ropey` rope so that very
-//! large files are cheap to open and edit. The web-view UI never receives the
-//! whole document — it asks for a *viewport* (the visible lines) and sends
-//! edits back. The protocol is intentionally simple and synchronous: we took
-//! the rope from Xi-editor's lineage and deliberately left the async/CRDT
-//! complexity that sank it (see the ADR).
+//! ADR-0002: the editable text lives in Rust; the web-view renders only a
+//! viewport (the visible lines) and sends edits back. The protocol is
+//! deliberately simple and synchronous — we took the rope idea from Xi-editor's
+//! lineage and left the async/CRDT complexity that sank it.
+//!
+//! ADR-0003: the buffer sits behind the [`Buffer`] trait so the engine is
+//! swappable. [`RopeBuffer`] is the in-memory `ropey` implementation — simple and
+//! proven, but with resident memory ≈ file size, so it is the *fallback*. The
+//! forthcoming `PieceTreeBuffer` (a piece tree over a memory-mapped original) will
+//! implement the same trait for true beyond-RAM large files. The Tauri commands
+//! depend on the trait, never a concrete buffer, so swapping the engine — or
+//! reverting to this one — is a single line in [`EditorState::default`].
 
 use ropey::Rope;
 use serde::Serialize;
@@ -15,28 +21,11 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 use tauri::State;
 
-/// A single open document. For now the editor holds exactly one; tabs (a
-/// registry of documents keyed by id) are the next step, kept out until the
-/// single-document path is proven — Xi's lesson: resist premature generality.
-pub struct Document {
-    rope: Rope,
-    path: Option<PathBuf>,
-    dirty: bool,
-}
-
-impl Default for Document {
-    fn default() -> Self {
-        Self {
-            rope: Rope::new(),
-            path: None,
-            dirty: false,
-        }
-    }
-}
-
-/// Tauri-managed state wrapping the current document behind a mutex.
-#[derive(Default)]
-pub struct EditorState(pub Mutex<Document>);
+mod highlight;
+mod mmapbuf;
+mod search;
+use highlight::{Span, HIGHLIGHT_MAX_BYTES};
+use search::build_regex;
 
 /// Lightweight document summary returned to the UI (never the whole text).
 #[derive(Serialize)]
@@ -45,96 +34,646 @@ pub struct DocumentMeta {
     pub line_count: usize,
     pub char_count: usize,
     pub dirty: bool,
+    /// True when the document is open on the read-only large-file (mmap) engine.
+    pub readonly: bool,
 }
 
-fn meta(doc: &Document) -> DocumentMeta {
-    DocumentMeta {
-        path: doc.path.as_ref().map(|p| p.display().to_string()),
-        line_count: doc.rope.len_lines(),
-        char_count: doc.rope.len_chars(),
-        dirty: doc.dirty,
+/// A caret position as (line, column), both zero-based, the column counted in
+/// Unicode characters within the line. The UI manages the caret itself in this
+/// character space, so there is no UTF-16/DOM-offset mismatch to reconcile.
+#[derive(Serialize)]
+pub struct CaretPos {
+    pub line: usize,
+    pub col: usize,
+}
+
+/// One line as sent to the UI. `text` is capped at `MAX_VIEWPORT_LINE` characters
+/// so a pathological line (a multi-MB minified file with no newlines) cannot
+/// serialise megabytes across IPC or spawn a giant DOM node. `chars` is always the
+/// line's TRUE character count (including a trailing newline) so the UI's offset
+/// accounting stays correct even when `text` is truncated.
+#[derive(Serialize)]
+pub struct ViewportLine {
+    pub text: String,
+    pub chars: usize,
+    pub truncated: bool,
+    pub spans: Vec<Span>,
+}
+
+const MAX_VIEWPORT_LINE: usize = 10_000;
+
+/// One entry in a directory listing for the file-tree panel.
+#[derive(Serialize)]
+pub struct DirEntry {
+    pub name: String,
+    pub path: String,
+    pub is_dir: bool,
+}
+
+/// One heading or symbol in the document outline panel.
+#[derive(Serialize)]
+pub struct OutlineItem {
+    pub level: u8,
+    pub title: String,
+    pub line: usize,
+}
+
+/// The editing buffer behind the Tauri commands.
+///
+/// Addressing is by Unicode character index for now; the move to viewport-local
+/// offsets and a `(line, col)` mapping (so UTF-16 carets from the web-view map
+/// correctly) is tracked separately, as is a line-length cap on `viewport`.
+pub trait Buffer: Send {
+    /// Load a file from disk, replacing the current document.
+    fn open(&mut self, path: &str) -> Result<DocumentMeta, String>;
+    /// Return the lines `[start, start + count)` — the UI's visible window.
+    fn viewport(&self, start: usize, count: usize) -> Result<Vec<ViewportLine>, String>;
+    /// Insert `text` at a character index.
+    fn insert(&mut self, char_idx: usize, text: &str) -> Result<DocumentMeta, String>;
+    /// Delete the character range `[start, end)`.
+    fn delete(&mut self, start: usize, end: usize) -> Result<DocumentMeta, String>;
+    /// Save to `path` (or the document's existing path if `None`).
+    fn save(&mut self, path: Option<String>) -> Result<DocumentMeta, String>;
+    /// Global character index for a (line, col) caret, clamped to the line's end
+    /// (never past its line break) and to the document.
+    fn pos_to_char(&self, line: usize, col: usize) -> usize;
+    /// The (line, col) a global character index falls on, clamped to the document.
+    fn char_to_pos(&self, char_idx: usize) -> CaretPos;
+    /// The text in the character range `[start, end)` (for copy/cut).
+    fn read_range(&self, start: usize, end: usize) -> Result<String, String>;
+    /// Find all matches; returns character ranges `[start, end)`.
+    fn search(&self, query: &str, use_regex: bool, case_sensitive: bool) -> Result<Vec<[usize; 2]>, String>;
+    /// Replace every match; returns the new document meta and the number replaced.
+    fn replace_all(
+        &mut self,
+        query: &str,
+        use_regex: bool,
+        case_sensitive: bool,
+        replacement: &str,
+    ) -> Result<(DocumentMeta, usize), String>;
+    /// Current document summary.
+    fn meta(&self) -> DocumentMeta;
+    /// Recompute cached syntax highlighting (no-op where the engine doesn't highlight).
+    fn rehighlight(&mut self);
+    /// Document outline (markdown headings, or simple code symbols); empty where
+    /// the engine doesn't support it.
+    fn outline(&self) -> Vec<OutlineItem> {
+        Vec::new()
     }
 }
 
-/// Open a file from disk into the rope. Streams via a buffered reader so the
-/// whole file is not first loaded into a `String`.
-#[tauri::command]
-pub fn open_document(path: String, state: State<EditorState>) -> Result<DocumentMeta, String> {
-    let file = File::open(&path).map_err(|e| e.to_string())?;
-    let rope = Rope::from_reader(BufReader::new(file)).map_err(|e| e.to_string())?;
-    let mut doc = state.0.lock().map_err(|e| e.to_string())?;
-    *doc = Document {
-        rope,
-        path: Some(PathBuf::from(&path)),
-        dirty: false,
-    };
-    Ok(meta(&doc))
+/// One open document (a tab).
+struct Tab {
+    id: u32,
+    path: Option<String>,
+    buffer: Box<dyn Buffer>,
 }
 
-/// Return the lines `[start, start + count)` — the UI's visible window.
+/// Summary of one tab for the UI's tab strip.
+#[derive(Serialize)]
+pub struct TabSummary {
+    pub id: u32,
+    pub name: String,
+    pub dirty: bool,
+    pub readonly: bool,
+    pub active: bool,
+}
+
+/// The tab strip plus the active document's meta, returned by the tab commands.
+#[derive(Serialize)]
+pub struct TabsState {
+    pub tabs: Vec<TabSummary>,
+    pub active: Option<u32>,
+    pub meta: Option<DocumentMeta>,
+}
+
+/// The open documents, keyed by id, with one active. Each tab holds its own
+/// buffer (so a big read-only mmap tab and small editable tabs coexist).
+#[derive(Default)]
+pub struct Registry {
+    tabs: Vec<Tab>,
+    active: Option<u32>,
+    next_id: u32,
+}
+
+impl Registry {
+    fn active_buffer(&self) -> Result<&(dyn Buffer + 'static), String> {
+        let id = self.active.ok_or("no document open")?;
+        self.tabs
+            .iter()
+            .find(|t| t.id == id)
+            .map(|t| t.buffer.as_ref())
+            .ok_or_else(|| "active tab missing".into())
+    }
+
+    fn active_buffer_mut(&mut self) -> Result<&mut (dyn Buffer + 'static), String> {
+        let id = self.active.ok_or("no document open")?;
+        self.tabs
+            .iter_mut()
+            .find(|t| t.id == id)
+            .map(|t| t.buffer.as_mut())
+            .ok_or_else(|| "active tab missing".into())
+    }
+
+    fn summaries(&self) -> Vec<TabSummary> {
+        self.tabs
+            .iter()
+            .map(|t| {
+                let m = t.buffer.meta();
+                let name = t
+                    .path
+                    .as_deref()
+                    .and_then(|p| std::path::Path::new(p).file_name())
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("untitled")
+                    .to_string();
+                TabSummary {
+                    id: t.id,
+                    name,
+                    dirty: m.dirty,
+                    readonly: m.readonly,
+                    active: Some(t.id) == self.active,
+                }
+            })
+            .collect()
+    }
+
+    fn tabs_state(&self) -> TabsState {
+        TabsState {
+            tabs: self.summaries(),
+            active: self.active,
+            meta: self.active_buffer().ok().map(|b| b.meta()),
+        }
+    }
+}
+
+/// Tauri-managed state: the open documents.
+pub struct EditorState(pub Mutex<Registry>);
+
+impl Default for EditorState {
+    fn default() -> Self {
+        Self(Mutex::new(Registry::default()))
+    }
+}
+
+/// `ropey`-backed buffer: the whole document lives in memory in a rope.
+///
+/// Edits and large-but-RAM-sized files are cheap (O(log n)); its ceiling is that
+/// resident memory tracks file size (a 5 GB file needs ~5 GB of RAM — see the
+/// probe in ADR-0003), which is why it is the fallback, not the large-file engine.
+pub struct RopeBuffer {
+    rope: Rope,
+    path: Option<PathBuf>,
+    dirty: bool,
+    ext: String,
+    highlights: Vec<Vec<Span>>,
+    dark: bool,
+}
+
+impl Default for RopeBuffer {
+    fn default() -> Self {
+        Self {
+            rope: Rope::new(),
+            path: None,
+            dirty: false,
+            ext: String::new(),
+            highlights: Vec::new(),
+            dark: false,
+        }
+    }
+}
+
+impl RopeBuffer {
+    fn make_meta(&self) -> DocumentMeta {
+        DocumentMeta {
+            path: self.path.as_ref().map(|p| p.display().to_string()),
+            line_count: self.rope.len_lines(),
+            char_count: self.rope.len_chars(),
+            dirty: self.dirty,
+            readonly: false,
+        }
+    }
+}
+
+impl Buffer for RopeBuffer {
+    fn open(&mut self, path: &str) -> Result<DocumentMeta, String> {
+        let file = File::open(path).map_err(|e| e.to_string())?;
+        // Streams via a buffered reader; still O(file-size) resident memory —
+        // ropey holds the whole document. ADR-0003 replaces this for large files.
+        self.rope = Rope::from_reader(BufReader::new(file)).map_err(|e| e.to_string())?;
+        self.path = Some(PathBuf::from(path));
+        self.dirty = false;
+        self.ext = std::path::Path::new(path)
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_string();
+        self.rehighlight();
+        Ok(self.make_meta())
+    }
+
+    fn viewport(&self, start: usize, count: usize) -> Result<Vec<ViewportLine>, String> {
+        let total = self.rope.len_lines();
+        let end = start.saturating_add(count).min(total);
+        let lines = (start..end)
+            .map(|i| {
+                let slice = self.rope.line(i);
+                let chars = slice.len_chars();
+                let spans = self.highlights.get(i).cloned().unwrap_or_default();
+                if chars > MAX_VIEWPORT_LINE {
+                    ViewportLine {
+                        text: slice.slice(0..MAX_VIEWPORT_LINE).to_string(),
+                        chars,
+                        truncated: true,
+                        spans,
+                    }
+                } else {
+                    ViewportLine {
+                        text: slice.to_string(),
+                        chars,
+                        truncated: false,
+                        spans,
+                    }
+                }
+            })
+            .collect();
+        Ok(lines)
+    }
+
+    fn insert(&mut self, char_idx: usize, text: &str) -> Result<DocumentMeta, String> {
+        if char_idx > self.rope.len_chars() {
+            return Err("insert index out of range".into());
+        }
+        self.rope.insert(char_idx, text);
+        self.dirty = true;
+        Ok(self.make_meta())
+    }
+
+    fn delete(&mut self, start: usize, end: usize) -> Result<DocumentMeta, String> {
+        if start > end || end > self.rope.len_chars() {
+            return Err("delete range out of bounds".into());
+        }
+        self.rope.remove(start..end);
+        self.dirty = true;
+        Ok(self.make_meta())
+    }
+
+    fn save(&mut self, path: Option<String>) -> Result<DocumentMeta, String> {
+        let target = match path.or_else(|| self.path.as_ref().map(|p| p.display().to_string())) {
+            Some(t) => t,
+            None => return Err("no path to save to".into()),
+        };
+        // Note: not yet atomic — a failed write truncates the original. Atomic
+        // save (temp -> fsync -> rename) is an M1 core-correctness item.
+        let file = File::create(&target).map_err(|e| e.to_string())?;
+        self.rope
+            .write_to(BufWriter::new(file))
+            .map_err(|e| e.to_string())?;
+        self.path = Some(PathBuf::from(&target));
+        self.dirty = false;
+        Ok(self.make_meta())
+    }
+
+    fn pos_to_char(&self, line: usize, col: usize) -> usize {
+        let total = self.rope.len_lines();
+        if total == 0 {
+            return 0;
+        }
+        let line = line.min(total - 1);
+        let line_start = self.rope.line_to_char(line);
+        let slice = self.rope.line(line);
+        // The caret may not sit past the line break: cap the column at the line's
+        // char length excluding a trailing "\n" (and a preceding "\r" for CRLF).
+        let mut max_col = slice.len_chars();
+        if max_col > 0 && slice.char(max_col - 1) == '\n' {
+            max_col -= 1;
+            if max_col > 0 && slice.char(max_col - 1) == '\r' {
+                max_col -= 1;
+            }
+        }
+        line_start + col.min(max_col)
+    }
+
+    fn char_to_pos(&self, char_idx: usize) -> CaretPos {
+        let idx = char_idx.min(self.rope.len_chars());
+        let line = self.rope.char_to_line(idx);
+        CaretPos {
+            line,
+            col: idx - self.rope.line_to_char(line),
+        }
+    }
+
+    fn read_range(&self, start: usize, end: usize) -> Result<String, String> {
+        if start > end || end > self.rope.len_chars() {
+            return Err("read range out of bounds".into());
+        }
+        Ok(self.rope.slice(start..end).to_string())
+    }
+
+    fn search(&self, query: &str, use_regex: bool, case_sensitive: bool) -> Result<Vec<[usize; 2]>, String> {
+        if query.is_empty() {
+            return Ok(Vec::new());
+        }
+        let re = build_regex(query, use_regex, case_sensitive)?;
+        let text = self.rope.to_string();
+        let mut out = Vec::new();
+        for m in re.find_iter(&text) {
+            if m.start() == m.end() {
+                continue; // skip empty matches (e.g. a lone `.*`)
+            }
+            out.push([self.rope.byte_to_char(m.start()), self.rope.byte_to_char(m.end())]);
+            if out.len() >= 10_000 {
+                break; // cap the payload
+            }
+        }
+        Ok(out)
+    }
+
+    fn replace_all(
+        &mut self,
+        query: &str,
+        use_regex: bool,
+        case_sensitive: bool,
+        replacement: &str,
+    ) -> Result<(DocumentMeta, usize), String> {
+        if query.is_empty() {
+            return Ok((self.make_meta(), 0));
+        }
+        let re = build_regex(query, use_regex, case_sensitive)?;
+        let text = self.rope.to_string();
+        let count = re.find_iter(&text).filter(|m| m.start() != m.end()).count();
+        if count > 0 {
+            // In regex mode `$1` etc. expand; in literal mode they do not.
+            let new = if use_regex {
+                re.replace_all(&text, replacement).into_owned()
+            } else {
+                re.replace_all(&text, regex::NoExpand(replacement)).into_owned()
+            };
+            self.rope = Rope::from_str(&new);
+            self.dirty = true;
+            self.rehighlight();
+        }
+        Ok((self.make_meta(), count))
+    }
+
+    fn meta(&self) -> DocumentMeta {
+        self.make_meta()
+    }
+
+    /// Recompute cached highlight spans for the whole document, when it is small
+    /// enough and has a known file type; otherwise leave it plain. Called on open,
+    /// after replace-all, and (debounced from the UI) after edits settle.
+    fn rehighlight(&mut self) {
+        if self.rope.len_bytes() <= HIGHLIGHT_MAX_BYTES && !self.ext.is_empty() {
+            let text = self.rope.to_string();
+            self.highlights = highlight::highlight_doc(&text, &self.ext, self.dark).unwrap_or_default();
+        } else {
+            self.highlights = Vec::new();
+        }
+    }
+
+    fn outline(&self) -> Vec<OutlineItem> {
+        let is_md = matches!(self.ext.as_str(), "md" | "markdown" | "mdown" | "mkd" | "markdn");
+        const CODE_STARTS: [&str; 15] = [
+            "pub fn ", "fn ", "pub struct ", "struct ", "pub enum ", "enum ", "impl ",
+            "pub trait ", "trait ", "pub mod ", "mod ", "class ", "function ", "def ", "export ",
+        ];
+        let mut out = Vec::new();
+        for i in 0..self.rope.len_lines() {
+            if out.len() >= 1000 {
+                break;
+            }
+            let line = self.rope.line(i);
+            let n = line.len_chars().min(200);
+            let raw: String = line.slice(0..n).to_string();
+            let t = raw.trim_start();
+            if is_md {
+                // ATX headings: 1-6 '#' then a space. '#' is ASCII, so the byte index
+                // after the hashes equals their count.
+                let hashes = t.chars().take_while(|c| *c == '#').count();
+                if (1..=6).contains(&hashes) && t.chars().nth(hashes) == Some(' ') {
+                    let title = t[hashes..].trim().trim_end_matches('#').trim().to_string();
+                    if !title.is_empty() {
+                        out.push(OutlineItem { level: hashes as u8, title, line: i });
+                    }
+                }
+            } else if CODE_STARTS.iter().any(|p| t.starts_with(p)) {
+                let title: String = t.trim_end().trim_end_matches('{').trim().chars().take(80).collect();
+                if !title.is_empty() {
+                    out.push(OutlineItem { level: 1, title, line: i });
+                }
+            }
+        }
+        out
+    }
+}
+
+// Tauri commands — thin delegations to the active buffer behind the mutex.
+
+#[tauri::command]
+pub fn open_document(
+    path: String,
+    dark: bool,
+    state: State<EditorState>,
+) -> Result<TabsState, String> {
+    let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+    let mut reg = state.0.lock().map_err(|e| e.to_string())?;
+
+    // If this file is already open, switch to its tab instead of duplicating it.
+    let existing = reg
+        .tabs
+        .iter()
+        .find(|t| t.path.as_deref() == Some(path.as_str()))
+        .map(|t| t.id);
+    if let Some(id) = existing {
+        reg.active = Some(id);
+        return Ok(reg.tabs_state());
+    }
+
+    // Pick the engine by file size: large files open read-only on the mmap engine
+    // (instant, flat memory), smaller files on the editable `RopeBuffer`. `dark`
+    // selects the highlight theme for the current colour scheme.
+    let mut buffer: Box<dyn Buffer> = if size >= mmapbuf::MMAP_THRESHOLD_BYTES {
+        Box::new(mmapbuf::MmapBuffer::default())
+    } else {
+        Box::new(RopeBuffer {
+            dark,
+            ..Default::default()
+        })
+    };
+    buffer.open(&path)?;
+
+    let id = reg.next_id;
+    reg.next_id += 1;
+    reg.tabs.push(Tab {
+        id,
+        path: Some(path),
+        buffer,
+    });
+    reg.active = Some(id);
+    Ok(reg.tabs_state())
+}
+
+#[tauri::command]
+pub fn list_tabs(state: State<EditorState>) -> Result<TabsState, String> {
+    Ok(state.0.lock().map_err(|e| e.to_string())?.tabs_state())
+}
+
+#[tauri::command]
+pub fn switch_tab(id: u32, state: State<EditorState>) -> Result<TabsState, String> {
+    let mut reg = state.0.lock().map_err(|e| e.to_string())?;
+    if reg.tabs.iter().any(|t| t.id == id) {
+        reg.active = Some(id);
+        Ok(reg.tabs_state())
+    } else {
+        Err("no such tab".into())
+    }
+}
+
+#[tauri::command]
+pub fn close_tab(id: u32, state: State<EditorState>) -> Result<TabsState, String> {
+    let mut reg = state.0.lock().map_err(|e| e.to_string())?;
+    if let Some(pos) = reg.tabs.iter().position(|t| t.id == id) {
+        reg.tabs.remove(pos);
+        if reg.active == Some(id) {
+            let next = reg
+                .tabs
+                .get(pos)
+                .or_else(|| reg.tabs.get(pos.saturating_sub(1)))
+                .map(|t| t.id);
+            reg.active = next;
+        }
+    }
+    Ok(reg.tabs_state())
+}
+
 #[tauri::command]
 pub fn get_viewport(
     start: usize,
     count: usize,
     state: State<EditorState>,
-) -> Result<Vec<String>, String> {
-    let doc = state.0.lock().map_err(|e| e.to_string())?;
-    let total = doc.rope.len_lines();
-    let end = start.saturating_add(count).min(total);
-    let lines = (start..end).map(|i| doc.rope.line(i).to_string()).collect();
-    Ok(lines)
+) -> Result<Vec<ViewportLine>, String> {
+    state.0.lock().map_err(|e| e.to_string())?.active_buffer()?.viewport(start, count)
 }
 
-/// Insert `text` at a character index.
 #[tauri::command]
 pub fn insert_text(
     char_idx: usize,
     text: String,
     state: State<EditorState>,
 ) -> Result<DocumentMeta, String> {
-    let mut doc = state.0.lock().map_err(|e| e.to_string())?;
-    if char_idx > doc.rope.len_chars() {
-        return Err("insert index out of range".into());
-    }
-    doc.rope.insert(char_idx, &text);
-    doc.dirty = true;
-    Ok(meta(&doc))
+    state.0.lock().map_err(|e| e.to_string())?.active_buffer_mut()?.insert(char_idx, &text)
 }
 
-/// Delete the character range `[start, end)`.
 #[tauri::command]
 pub fn delete_range(
     start: usize,
     end: usize,
     state: State<EditorState>,
 ) -> Result<DocumentMeta, String> {
-    let mut doc = state.0.lock().map_err(|e| e.to_string())?;
-    if start > end || end > doc.rope.len_chars() {
-        return Err("delete range out of bounds".into());
-    }
-    doc.rope.remove(start..end);
-    doc.dirty = true;
-    Ok(meta(&doc))
+    state.0.lock().map_err(|e| e.to_string())?.active_buffer_mut()?.delete(start, end)
 }
 
-/// Save to `path` (or the document's existing path if `None`).
 #[tauri::command]
 pub fn save_document(
     path: Option<String>,
     state: State<EditorState>,
 ) -> Result<DocumentMeta, String> {
-    let mut doc = state.0.lock().map_err(|e| e.to_string())?;
-    let target = match path.or_else(|| doc.path.as_ref().map(|p| p.display().to_string())) {
-        Some(t) => t,
-        None => return Err("no path to save to".into()),
-    };
-    let file = File::create(&target).map_err(|e| e.to_string())?;
-    doc.rope
-        .write_to(BufWriter::new(file))
-        .map_err(|e| e.to_string())?;
-    doc.path = Some(PathBuf::from(&target));
-    doc.dirty = false;
-    Ok(meta(&doc))
+    state.0.lock().map_err(|e| e.to_string())?.active_buffer_mut()?.save(path)
+}
+
+#[tauri::command]
+pub fn pos_to_char(line: usize, col: usize, state: State<EditorState>) -> Result<usize, String> {
+    Ok(state.0.lock().map_err(|e| e.to_string())?.active_buffer()?.pos_to_char(line, col))
+}
+
+#[tauri::command]
+pub fn char_to_pos(char_idx: usize, state: State<EditorState>) -> Result<CaretPos, String> {
+    Ok(state.0.lock().map_err(|e| e.to_string())?.active_buffer()?.char_to_pos(char_idx))
+}
+
+#[tauri::command]
+pub fn read_range(start: usize, end: usize, state: State<EditorState>) -> Result<String, String> {
+    state.0.lock().map_err(|e| e.to_string())?.active_buffer()?.read_range(start, end)
+}
+
+#[tauri::command]
+pub fn search(
+    query: String,
+    use_regex: bool,
+    case_sensitive: bool,
+    state: State<EditorState>,
+) -> Result<Vec<[usize; 2]>, String> {
+    state.0.lock().map_err(|e| e.to_string())?.active_buffer()?.search(&query, use_regex, case_sensitive)
+}
+
+#[derive(Serialize)]
+pub struct ReplaceResult {
+    pub meta: DocumentMeta,
+    pub count: usize,
+}
+
+#[tauri::command]
+pub fn replace_all(
+    query: String,
+    use_regex: bool,
+    case_sensitive: bool,
+    replacement: String,
+    state: State<EditorState>,
+) -> Result<ReplaceResult, String> {
+    let (meta, count) = state
+        .0
+        .lock()
+        .map_err(|e| e.to_string())?
+        .active_buffer_mut()?
+        .replace_all(&query, use_regex, case_sensitive, &replacement)?;
+    Ok(ReplaceResult { meta, count })
+}
+
+/// List one directory's immediate children (the file tree expands lazily per folder).
+#[tauri::command]
+pub fn list_dir(path: String) -> Result<Vec<DirEntry>, String> {
+    const SKIP: [&str; 4] = [".git", "node_modules", "target", ".DS_Store"];
+    let mut entries = Vec::new();
+    for e in std::fs::read_dir(&path).map_err(|e| e.to_string())? {
+        let e = e.map_err(|e| e.to_string())?;
+        let name = e.file_name().to_string_lossy().into_owned();
+        if SKIP.contains(&name.as_str()) {
+            continue;
+        }
+        let is_dir = e.file_type().map(|f| f.is_dir()).unwrap_or(false);
+        entries.push(DirEntry { name, path: e.path().display().to_string(), is_dir });
+    }
+    // Folders first, then case-insensitive by name.
+    entries.sort_by(|a, b| {
+        b.is_dir
+            .cmp(&a.is_dir)
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
+    Ok(entries)
+}
+
+/// The user's home directory, for the file tree's cold-start default.
+#[tauri::command]
+pub fn home_dir() -> Option<String> {
+    std::env::var("USERPROFILE")
+        .or_else(|_| std::env::var("HOME"))
+        .ok()
+        .filter(|s| !s.is_empty())
+}
+
+/// The active document's outline for the outline panel.
+#[tauri::command]
+pub fn get_outline(state: State<EditorState>) -> Result<Vec<OutlineItem>, String> {
+    Ok(state.0.lock().map_err(|e| e.to_string())?.active_buffer()?.outline())
+}
+
+#[tauri::command]
+pub fn refresh_highlights(state: State<EditorState>) -> Result<DocumentMeta, String> {
+    let mut reg = state.0.lock().map_err(|e| e.to_string())?;
+    let b = reg.active_buffer_mut()?;
+    b.rehighlight();
+    Ok(b.meta())
 }
 
 #[cfg(test)]
@@ -143,21 +682,97 @@ mod tests {
 
     #[test]
     fn viewport_returns_requested_lines() {
-        let mut d = Document::default();
-        d.rope = Rope::from_str("one\ntwo\nthree\n");
-        let total = d.rope.len_lines();
-        let start = 1;
-        let end = (start + 1).min(total);
-        let lines: Vec<String> = (start..end).map(|i| d.rope.line(i).to_string()).collect();
-        assert_eq!(lines, vec!["two\n".to_string()]);
+        let mut b = RopeBuffer::default();
+        b.insert(0, "one\ntwo\nthree\n").unwrap();
+        let vp = b.viewport(1, 1).unwrap();
+        assert_eq!(vp[0].text, "two\n");
+        assert!(!vp[0].truncated);
+    }
+
+    #[test]
+    fn viewport_clamps_past_the_end() {
+        let mut b = RopeBuffer::default();
+        b.insert(0, "a\nb\n").unwrap();
+        // Asking for more lines than exist returns what is there, not an error.
+        assert!(b.viewport(0, usize::MAX).is_ok());
     }
 
     #[test]
     fn edits_change_length_and_content() {
-        let mut d = Document::default();
-        d.rope.insert(0, "abc");
-        assert_eq!(d.rope.len_chars(), 3);
-        d.rope.remove(0..1);
-        assert_eq!(d.rope.to_string(), "bc");
+        let mut b = RopeBuffer::default();
+        let after_insert = b.insert(0, "abc").unwrap();
+        assert_eq!(after_insert.char_count, 3);
+        let after_delete = b.delete(0, 1).unwrap();
+        assert!(after_delete.dirty);
+        assert_eq!(b.viewport(0, 1).unwrap()[0].text, "bc");
+    }
+
+    #[test]
+    fn highlights_rust_source() {
+        let s = highlight::highlight_doc("fn main() {}\n", "rs", false);
+        assert!(s.is_some(), "two-face should know Rust");
+        assert!(s.unwrap().iter().any(|line| !line.is_empty()));
+    }
+
+    #[test]
+    fn highlights_common_types_with_varied_colours() {
+        for (text, ext) in [
+            ("# Heading\n\n**bold** text\n", "md"),
+            ("[package]\nname = \"x\"\n", "toml"),
+            ("$x = 1\nWrite-Host $x\n", "ps1"),
+        ] {
+            let spans = highlight::highlight_doc(text, ext, false)
+                .unwrap_or_else(|| panic!("no syntax for .{ext}"));
+            let colours: std::collections::HashSet<_> =
+                spans.iter().flatten().map(|s| s.color.clone()).collect();
+            assert!(colours.len() > 1, ".{ext} produced only one colour: {colours:?}");
+        }
+    }
+
+    #[test]
+    fn long_lines_are_capped_but_report_true_length() {
+        let mut b = RopeBuffer::default();
+        let long = "a".repeat(MAX_VIEWPORT_LINE + 500);
+        b.insert(0, &long).unwrap();
+        let vp = b.viewport(0, 1).unwrap();
+        assert!(vp[0].truncated);
+        assert_eq!(vp[0].text.chars().count(), MAX_VIEWPORT_LINE);
+        assert_eq!(vp[0].chars, MAX_VIEWPORT_LINE + 500);
+    }
+
+    #[test]
+    fn insert_past_end_is_rejected() {
+        let mut b = RopeBuffer::default();
+        assert!(b.insert(5, "x").is_err());
+    }
+
+    #[test]
+    fn delete_out_of_bounds_is_rejected() {
+        let mut b = RopeBuffer::default();
+        b.insert(0, "abc").unwrap();
+        assert!(b.delete(0, 99).is_err());
+        assert!(b.delete(2, 1).is_err());
+    }
+
+    #[test]
+    fn caret_conversions_handle_lines_and_multibyte() {
+        let mut b = RopeBuffer::default();
+        // "héllo" is 5 characters (é is one char); then a newline, then "wörld".
+        b.insert(0, "héllo\nwörld\n").unwrap();
+
+        // Column past the end of a line clamps to the line end (before the break).
+        assert_eq!(b.pos_to_char(0, 100), 5);
+        // Start of the second line is after the 5 chars + the newline.
+        assert_eq!(b.pos_to_char(1, 0), 6);
+
+        // Round-trips.
+        let p = b.char_to_pos(5);
+        assert_eq!((p.line, p.col), (0, 5));
+        let q = b.char_to_pos(6);
+        assert_eq!((q.line, q.col), (1, 0));
+
+        // A line index past the end clamps to the last line.
+        let far = b.pos_to_char(999, 0);
+        assert_eq!(far, b.rope.line_to_char(b.rope.len_lines() - 1));
     }
 }
