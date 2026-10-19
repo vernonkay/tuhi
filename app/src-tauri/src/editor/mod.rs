@@ -616,7 +616,15 @@ impl Buffer for RopeBuffer {
             } else if CODE_STARTS.iter().any(|p| t.starts_with(p)) {
                 let title: String = t.trim_end().trim_end_matches('{').trim().chars().take(80).collect();
                 if !title.is_empty() {
-                    out.push(OutlineItem { level: 1, title, line: i });
+                    // Nest by indentation (tab = 4 cols), so e.g. methods sit under their
+                    // impl/mod. One indent step per ~4 columns, capped at 6 levels.
+                    let indent: usize = raw
+                        .chars()
+                        .take_while(|c| c.is_whitespace())
+                        .map(|c| if c == '\t' { 4 } else { 1 })
+                        .sum();
+                    let level = (1 + indent / 4).min(6) as u8;
+                    out.push(OutlineItem { level, title, line: i });
                 }
             }
         }
