@@ -7,7 +7,7 @@
 //! RAM) cannot. Editing on this engine (the full piece tree) is the next step;
 //! for now it is read-only, and the UI reflects that.
 
-use super::{Buffer, CaretPos, DocumentMeta, EditorError, ViewportLine, MAX_VIEWPORT_LINE};
+use super::{Buffer, CaretPos, DocumentMeta, EditorError, FilterMatch, ViewportLine, MAX_VIEWPORT_LINE};
 use memmap2::Mmap;
 use std::fs::File;
 use std::path::PathBuf;
@@ -137,6 +137,49 @@ impl Buffer for MmapBuffer {
     }
     fn read_range(&self, _start: usize, _end: usize) -> Result<String, EditorError> {
         Err(EditorError::ReadOnly)
+    }
+
+    // Filter works read-only, so a huge log can be filtered to its matching lines.
+    fn filter(
+        &self,
+        query: &str,
+        use_regex: bool,
+        case_sensitive: bool,
+    ) -> Result<Vec<FilterMatch>, EditorError> {
+        if query.is_empty() {
+            return Ok(Vec::new());
+        }
+        let bytes = match &self.mmap {
+            Some(m) => &m[..],
+            None => return Ok(Vec::new()),
+        };
+        let re =
+            super::search::build_regex(query, use_regex, case_sensitive).map_err(EditorError::Regex)?;
+        let mut out = Vec::new();
+        for i in 0..self.line_starts.len() {
+            let a = self.line_starts[i];
+            let b = self
+                .line_starts
+                .get(i + 1)
+                .copied()
+                .unwrap_or(self.len_bytes)
+                .min(self.len_bytes)
+                .max(a);
+            let s = String::from_utf8_lossy(&bytes[a..b]);
+            if re.is_match(&s) {
+                let truncated = s.chars().count() > MAX_VIEWPORT_LINE;
+                let text: String = if truncated {
+                    s.chars().take(MAX_VIEWPORT_LINE).collect()
+                } else {
+                    s.into_owned()
+                };
+                out.push(FilterMatch { line: i, text, truncated });
+                if out.len() >= super::MAX_FILTER_MATCHES {
+                    break;
+                }
+            }
+        }
+        Ok(out)
     }
 
     // Caret math is not used while read-only (the UI hides the caret), but the
