@@ -33,5 +33,5 @@ First public release: a fast, cross-platform editor that leads with large-file h
   and session restore (reopens the files you had open).
 - A restrictive Content-Security-Policy.
 
-[Unreleased]: https://github.com/vernon-kay/tuhi/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/vernon-kay/tuhi/releases/tag/v0.1.0
+[Unreleased]: https://github.com/vernonkay/tuhi/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/vernonkay/tuhi/releases/tag/v0.1.0
