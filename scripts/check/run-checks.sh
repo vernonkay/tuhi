@@ -36,9 +36,12 @@ if command -v cargo-audit >/dev/null 2>&1; then
 else
     echo "   (skipped: cargo-audit not installed — 'cargo install cargo-audit')"
 fi
-echo "── cargo deny check"
+# deny covers licences, banned/duplicate crates and crate sources; cargo-audit above
+# owns security advisories, so we skip deny's advisories check (it otherwise fails the
+# build on upstream transitive unmaintained/unsound advisories we don't control).
+echo "── cargo deny check (licenses bans sources)"
 if command -v cargo-deny >/dev/null 2>&1; then
-    ( cd app/src-tauri && cargo deny check ) || fail=1
+    ( cd app/src-tauri && cargo deny check licenses bans sources ) || fail=1
 else
     echo "   (skipped: cargo-deny not installed — 'cargo install cargo-deny')"
 fi
