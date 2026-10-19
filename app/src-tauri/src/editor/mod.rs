@@ -23,10 +23,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::State;
 
 mod encoding;
+mod error;
 mod highlight;
 mod mmapbuf;
 mod search;
 use encoding::Encoding;
+use error::EditorError;
 use highlight::{Span, HIGHLIGHT_MAX_BYTES};
 use search::build_regex;
 
@@ -88,24 +90,24 @@ pub struct OutlineItem {
 /// correctly) is tracked separately, as is a line-length cap on `viewport`.
 pub trait Buffer: Send {
     /// Load a file from disk, replacing the current document.
-    fn open(&mut self, path: &str) -> Result<DocumentMeta, String>;
+    fn open(&mut self, path: &str) -> Result<DocumentMeta, EditorError>;
     /// Return the lines `[start, start + count)` — the UI's visible window.
-    fn viewport(&self, start: usize, count: usize) -> Result<Vec<ViewportLine>, String>;
+    fn viewport(&self, start: usize, count: usize) -> Result<Vec<ViewportLine>, EditorError>;
     /// Insert `text` at a character index.
-    fn insert(&mut self, char_idx: usize, text: &str) -> Result<DocumentMeta, String>;
+    fn insert(&mut self, char_idx: usize, text: &str) -> Result<DocumentMeta, EditorError>;
     /// Delete the character range `[start, end)`.
-    fn delete(&mut self, start: usize, end: usize) -> Result<DocumentMeta, String>;
+    fn delete(&mut self, start: usize, end: usize) -> Result<DocumentMeta, EditorError>;
     /// Save to `path` (or the document's existing path if `None`).
-    fn save(&mut self, path: Option<String>) -> Result<DocumentMeta, String>;
+    fn save(&mut self, path: Option<String>) -> Result<DocumentMeta, EditorError>;
     /// Global character index for a (line, col) caret, clamped to the line's end
     /// (never past its line break) and to the document.
     fn pos_to_char(&self, line: usize, col: usize) -> usize;
     /// The (line, col) a global character index falls on, clamped to the document.
     fn char_to_pos(&self, char_idx: usize) -> CaretPos;
     /// The text in the character range `[start, end)` (for copy/cut).
-    fn read_range(&self, start: usize, end: usize) -> Result<String, String>;
+    fn read_range(&self, start: usize, end: usize) -> Result<String, EditorError>;
     /// Find all matches; returns character ranges `[start, end)`.
-    fn search(&self, query: &str, use_regex: bool, case_sensitive: bool) -> Result<Vec<[usize; 2]>, String>;
+    fn search(&self, query: &str, use_regex: bool, case_sensitive: bool) -> Result<Vec<[usize; 2]>, EditorError>;
     /// Replace every match; returns the new document meta and the number replaced.
     fn replace_all(
         &mut self,
@@ -113,7 +115,7 @@ pub trait Buffer: Send {
         use_regex: bool,
         case_sensitive: bool,
         replacement: &str,
-    ) -> Result<(DocumentMeta, usize), String>;
+    ) -> Result<(DocumentMeta, usize), EditorError>;
     /// Current document summary.
     fn meta(&self) -> DocumentMeta;
     /// Recompute cached syntax highlighting (no-op where the engine doesn't highlight).
@@ -160,22 +162,22 @@ pub struct Registry {
 }
 
 impl Registry {
-    fn active_buffer(&self) -> Result<&(dyn Buffer + 'static), String> {
-        let id = self.active.ok_or("no document open")?;
+    fn active_buffer(&self) -> Result<&(dyn Buffer + 'static), EditorError> {
+        let id = self.active.ok_or(EditorError::NoActiveDocument)?;
         self.tabs
             .iter()
             .find(|t| t.id == id)
             .map(|t| t.buffer.as_ref())
-            .ok_or_else(|| "active tab missing".into())
+            .ok_or(EditorError::ActiveTabMissing)
     }
 
-    fn active_buffer_mut(&mut self) -> Result<&mut (dyn Buffer + 'static), String> {
-        let id = self.active.ok_or("no document open")?;
+    fn active_buffer_mut(&mut self) -> Result<&mut (dyn Buffer + 'static), EditorError> {
+        let id = self.active.ok_or(EditorError::NoActiveDocument)?;
         self.tabs
             .iter_mut()
             .find(|t| t.id == id)
             .map(|t| t.buffer.as_mut())
-            .ok_or_else(|| "active tab missing".into())
+            .ok_or(EditorError::ActiveTabMissing)
     }
 
     fn summaries(&self) -> Vec<TabSummary> {
@@ -265,11 +267,11 @@ impl RopeBuffer {
 }
 
 impl Buffer for RopeBuffer {
-    fn open(&mut self, path: &str) -> Result<DocumentMeta, String> {
+    fn open(&mut self, path: &str) -> Result<DocumentMeta, EditorError> {
         // Read the whole file (O(file-size) resident memory — ropey holds the whole
         // document; ADR-0003's mmap engine covers large files) and decode by detected
         // encoding, so non-UTF-8 files (many logs) open instead of hard-failing.
-        let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+        let bytes = std::fs::read(path)?;
         let decoded = encoding::decode(&bytes);
         self.rope = Rope::from_str(&decoded.text);
         self.encoding = decoded.encoding;
@@ -285,7 +287,7 @@ impl Buffer for RopeBuffer {
         Ok(self.make_meta())
     }
 
-    fn viewport(&self, start: usize, count: usize) -> Result<Vec<ViewportLine>, String> {
+    fn viewport(&self, start: usize, count: usize) -> Result<Vec<ViewportLine>, EditorError> {
         let total = self.rope.len_lines();
         let end = start.saturating_add(count).min(total);
         let lines = (start..end)
@@ -313,28 +315,28 @@ impl Buffer for RopeBuffer {
         Ok(lines)
     }
 
-    fn insert(&mut self, char_idx: usize, text: &str) -> Result<DocumentMeta, String> {
+    fn insert(&mut self, char_idx: usize, text: &str) -> Result<DocumentMeta, EditorError> {
         if char_idx > self.rope.len_chars() {
-            return Err("insert index out of range".into());
+            return Err(EditorError::IndexOutOfRange { idx: char_idx, len: self.rope.len_chars() });
         }
         self.rope.insert(char_idx, text);
         self.dirty = true;
         Ok(self.make_meta())
     }
 
-    fn delete(&mut self, start: usize, end: usize) -> Result<DocumentMeta, String> {
+    fn delete(&mut self, start: usize, end: usize) -> Result<DocumentMeta, EditorError> {
         if start > end || end > self.rope.len_chars() {
-            return Err("delete range out of bounds".into());
+            return Err(EditorError::InvalidRange { start, end });
         }
         self.rope.remove(start..end);
         self.dirty = true;
         Ok(self.make_meta())
     }
 
-    fn save(&mut self, path: Option<String>) -> Result<DocumentMeta, String> {
+    fn save(&mut self, path: Option<String>) -> Result<DocumentMeta, EditorError> {
         let target = match path.or_else(|| self.path.as_ref().map(|p| p.display().to_string())) {
             Some(t) => t,
-            None => return Err("no path to save to".into()),
+            None => return Err(EditorError::NoPath),
         };
         let target_path = PathBuf::from(&target);
 
@@ -369,7 +371,7 @@ impl Buffer for RopeBuffer {
         };
         if let Err(e) = write() {
             let _ = fs::remove_file(&tmp_path);
-            return Err(format!("save failed, original left intact: {e}"));
+            return Err(EditorError::Other(format!("save failed, original left intact: {e}")));
         }
 
         // Carry the existing file's permissions across the replace (best effort).
@@ -379,7 +381,7 @@ impl Buffer for RopeBuffer {
 
         if let Err(e) = fs::rename(&tmp_path, &target_path) {
             let _ = fs::remove_file(&tmp_path);
-            return Err(format!("save failed on rename, original left intact: {e}"));
+            return Err(EditorError::Other(format!("save failed on rename, original left intact: {e}")));
         }
 
         self.path = Some(target_path);
@@ -416,18 +418,18 @@ impl Buffer for RopeBuffer {
         }
     }
 
-    fn read_range(&self, start: usize, end: usize) -> Result<String, String> {
+    fn read_range(&self, start: usize, end: usize) -> Result<String, EditorError> {
         if start > end || end > self.rope.len_chars() {
-            return Err("read range out of bounds".into());
+            return Err(EditorError::InvalidRange { start, end });
         }
         Ok(self.rope.slice(start..end).to_string())
     }
 
-    fn search(&self, query: &str, use_regex: bool, case_sensitive: bool) -> Result<Vec<[usize; 2]>, String> {
+    fn search(&self, query: &str, use_regex: bool, case_sensitive: bool) -> Result<Vec<[usize; 2]>, EditorError> {
         if query.is_empty() {
             return Ok(Vec::new());
         }
-        let re = build_regex(query, use_regex, case_sensitive)?;
+        let re = build_regex(query, use_regex, case_sensitive).map_err(EditorError::Regex)?;
         let text = self.rope.to_string();
         let mut out = Vec::new();
         for m in re.find_iter(&text) {
@@ -448,11 +450,11 @@ impl Buffer for RopeBuffer {
         use_regex: bool,
         case_sensitive: bool,
         replacement: &str,
-    ) -> Result<(DocumentMeta, usize), String> {
+    ) -> Result<(DocumentMeta, usize), EditorError> {
         if query.is_empty() {
             return Ok((self.make_meta(), 0));
         }
-        let re = build_regex(query, use_regex, case_sensitive)?;
+        let re = build_regex(query, use_regex, case_sensitive).map_err(EditorError::Regex)?;
         let text = self.rope.to_string();
         let count = re.find_iter(&text).filter(|m| m.start() != m.end()).count();
         if count > 0 {
@@ -528,9 +530,9 @@ pub fn open_document(
     path: String,
     dark: bool,
     state: State<EditorState>,
-) -> Result<TabsState, String> {
+) -> Result<TabsState, EditorError> {
     let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-    let mut reg = state.0.lock().map_err(|e| e.to_string())?;
+    let mut reg = state.0.lock().map_err(|_| EditorError::LockPoisoned)?;
 
     // If this file is already open, switch to its tab instead of duplicating it.
     let existing = reg
@@ -568,24 +570,24 @@ pub fn open_document(
 }
 
 #[tauri::command]
-pub fn list_tabs(state: State<EditorState>) -> Result<TabsState, String> {
-    Ok(state.0.lock().map_err(|e| e.to_string())?.tabs_state())
+pub fn list_tabs(state: State<EditorState>) -> Result<TabsState, EditorError> {
+    Ok(state.0.lock().map_err(|_| EditorError::LockPoisoned)?.tabs_state())
 }
 
 #[tauri::command]
-pub fn switch_tab(id: u32, state: State<EditorState>) -> Result<TabsState, String> {
-    let mut reg = state.0.lock().map_err(|e| e.to_string())?;
+pub fn switch_tab(id: u32, state: State<EditorState>) -> Result<TabsState, EditorError> {
+    let mut reg = state.0.lock().map_err(|_| EditorError::LockPoisoned)?;
     if reg.tabs.iter().any(|t| t.id == id) {
         reg.active = Some(id);
         Ok(reg.tabs_state())
     } else {
-        Err("no such tab".into())
+        Err(EditorError::Other("no such tab".into()))
     }
 }
 
 #[tauri::command]
-pub fn close_tab(id: u32, state: State<EditorState>) -> Result<TabsState, String> {
-    let mut reg = state.0.lock().map_err(|e| e.to_string())?;
+pub fn close_tab(id: u32, state: State<EditorState>) -> Result<TabsState, EditorError> {
+    let mut reg = state.0.lock().map_err(|_| EditorError::LockPoisoned)?;
     if let Some(pos) = reg.tabs.iter().position(|t| t.id == id) {
         reg.tabs.remove(pos);
         if reg.active == Some(id) {
@@ -605,8 +607,8 @@ pub fn get_viewport(
     start: usize,
     count: usize,
     state: State<EditorState>,
-) -> Result<Vec<ViewportLine>, String> {
-    state.0.lock().map_err(|e| e.to_string())?.active_buffer()?.viewport(start, count)
+) -> Result<Vec<ViewportLine>, EditorError> {
+    state.0.lock().map_err(|_| EditorError::LockPoisoned)?.active_buffer()?.viewport(start, count)
 }
 
 #[tauri::command]
@@ -614,8 +616,8 @@ pub fn insert_text(
     char_idx: usize,
     text: String,
     state: State<EditorState>,
-) -> Result<DocumentMeta, String> {
-    state.0.lock().map_err(|e| e.to_string())?.active_buffer_mut()?.insert(char_idx, &text)
+) -> Result<DocumentMeta, EditorError> {
+    state.0.lock().map_err(|_| EditorError::LockPoisoned)?.active_buffer_mut()?.insert(char_idx, &text)
 }
 
 #[tauri::command]
@@ -623,31 +625,31 @@ pub fn delete_range(
     start: usize,
     end: usize,
     state: State<EditorState>,
-) -> Result<DocumentMeta, String> {
-    state.0.lock().map_err(|e| e.to_string())?.active_buffer_mut()?.delete(start, end)
+) -> Result<DocumentMeta, EditorError> {
+    state.0.lock().map_err(|_| EditorError::LockPoisoned)?.active_buffer_mut()?.delete(start, end)
 }
 
 #[tauri::command]
 pub fn save_document(
     path: Option<String>,
     state: State<EditorState>,
-) -> Result<DocumentMeta, String> {
-    state.0.lock().map_err(|e| e.to_string())?.active_buffer_mut()?.save(path)
+) -> Result<DocumentMeta, EditorError> {
+    state.0.lock().map_err(|_| EditorError::LockPoisoned)?.active_buffer_mut()?.save(path)
 }
 
 #[tauri::command]
-pub fn pos_to_char(line: usize, col: usize, state: State<EditorState>) -> Result<usize, String> {
-    Ok(state.0.lock().map_err(|e| e.to_string())?.active_buffer()?.pos_to_char(line, col))
+pub fn pos_to_char(line: usize, col: usize, state: State<EditorState>) -> Result<usize, EditorError> {
+    Ok(state.0.lock().map_err(|_| EditorError::LockPoisoned)?.active_buffer()?.pos_to_char(line, col))
 }
 
 #[tauri::command]
-pub fn char_to_pos(char_idx: usize, state: State<EditorState>) -> Result<CaretPos, String> {
-    Ok(state.0.lock().map_err(|e| e.to_string())?.active_buffer()?.char_to_pos(char_idx))
+pub fn char_to_pos(char_idx: usize, state: State<EditorState>) -> Result<CaretPos, EditorError> {
+    Ok(state.0.lock().map_err(|_| EditorError::LockPoisoned)?.active_buffer()?.char_to_pos(char_idx))
 }
 
 #[tauri::command]
-pub fn read_range(start: usize, end: usize, state: State<EditorState>) -> Result<String, String> {
-    state.0.lock().map_err(|e| e.to_string())?.active_buffer()?.read_range(start, end)
+pub fn read_range(start: usize, end: usize, state: State<EditorState>) -> Result<String, EditorError> {
+    state.0.lock().map_err(|_| EditorError::LockPoisoned)?.active_buffer()?.read_range(start, end)
 }
 
 #[tauri::command]
@@ -656,8 +658,8 @@ pub fn search(
     use_regex: bool,
     case_sensitive: bool,
     state: State<EditorState>,
-) -> Result<Vec<[usize; 2]>, String> {
-    state.0.lock().map_err(|e| e.to_string())?.active_buffer()?.search(&query, use_regex, case_sensitive)
+) -> Result<Vec<[usize; 2]>, EditorError> {
+    state.0.lock().map_err(|_| EditorError::LockPoisoned)?.active_buffer()?.search(&query, use_regex, case_sensitive)
 }
 
 #[derive(Serialize)]
@@ -673,11 +675,11 @@ pub fn replace_all(
     case_sensitive: bool,
     replacement: String,
     state: State<EditorState>,
-) -> Result<ReplaceResult, String> {
+) -> Result<ReplaceResult, EditorError> {
     let (meta, count) = state
         .0
         .lock()
-        .map_err(|e| e.to_string())?
+        .map_err(|_| EditorError::LockPoisoned)?
         .active_buffer_mut()?
         .replace_all(&query, use_regex, case_sensitive, &replacement)?;
     Ok(ReplaceResult { meta, count })
@@ -685,11 +687,11 @@ pub fn replace_all(
 
 /// List one directory's immediate children (the file tree expands lazily per folder).
 #[tauri::command]
-pub fn list_dir(path: String) -> Result<Vec<DirEntry>, String> {
+pub fn list_dir(path: String) -> Result<Vec<DirEntry>, EditorError> {
     const SKIP: [&str; 4] = [".git", "node_modules", "target", ".DS_Store"];
     let mut entries = Vec::new();
-    for e in std::fs::read_dir(&path).map_err(|e| e.to_string())? {
-        let e = e.map_err(|e| e.to_string())?;
+    for e in std::fs::read_dir(&path)? {
+        let e = e?;
         let name = e.file_name().to_string_lossy().into_owned();
         if SKIP.contains(&name.as_str()) {
             continue;
@@ -717,13 +719,13 @@ pub fn home_dir() -> Option<String> {
 
 /// The active document's outline for the outline panel.
 #[tauri::command]
-pub fn get_outline(state: State<EditorState>) -> Result<Vec<OutlineItem>, String> {
-    Ok(state.0.lock().map_err(|e| e.to_string())?.active_buffer()?.outline())
+pub fn get_outline(state: State<EditorState>) -> Result<Vec<OutlineItem>, EditorError> {
+    Ok(state.0.lock().map_err(|_| EditorError::LockPoisoned)?.active_buffer()?.outline())
 }
 
 #[tauri::command]
-pub fn refresh_highlights(state: State<EditorState>) -> Result<DocumentMeta, String> {
-    let mut reg = state.0.lock().map_err(|e| e.to_string())?;
+pub fn refresh_highlights(state: State<EditorState>) -> Result<DocumentMeta, EditorError> {
+    let mut reg = state.0.lock().map_err(|_| EditorError::LockPoisoned)?;
     let b = reg.active_buffer_mut()?;
     b.rehighlight();
     Ok(b.meta())
