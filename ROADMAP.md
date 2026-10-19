@@ -17,6 +17,16 @@ The lovable baseline, leading with large files:
   collapsible outline, a command palette, session restore.
 - Cross-platform: Windows, macOS, Linux.
 
+## Next up — Settings v1 (preferences panel)
+
+Top of the queue for the next build. The Settings icon is already in the rail; this wires
+it into a lean preferences panel, in the spirit of "every option earns its place":
+
+- Theme override (today it's auto light/dark), font family and size, tab width and
+  tabs-vs-spaces.
+- Default encoding and line endings, a word-wrap toggle.
+- Manage the highlighter rules (today stored only in the web-view's localStorage).
+
 ## 0.2 — Markdown mode (next headline)
 
 - Hybrid live Markdown preview (Typora-style, no vault required): Mermaid, KaTeX,
