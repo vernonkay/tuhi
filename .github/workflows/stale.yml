@@ -1,0 +1,35 @@
+name: Stale
+
+# Only nudges items that are waiting on the reporter (needs-info). Nothing we've
+# accepted, backlogged, or flagged for contributors is ever auto-closed.
+
+on:
+  schedule:
+    - cron: "30 1 * * *"
+  workflow_dispatch:
+
+permissions:
+  issues: write
+  pull-requests: write
+
+jobs:
+  stale:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/stale@v9
+        with:
+          only-labels: "needs-info"
+          days-before-stale: 45
+          days-before-close: 14
+          stale-issue-label: stale
+          exempt-issue-labels: "accepted,backlog,help wanted,good first issue"
+          stale-issue-message: >
+            This has been waiting on more information for a while. If it's still
+            relevant, just add the detail above and we'll pick it back up, otherwise it
+            will close itself in a couple of weeks. No worries either way, and thanks
+            again for raising it.
+          close-issue-message: >
+            Closing this for now since it's been quiet. Please comment if you can add the
+            detail and I'll reopen it happily.
+          days-before-pr-stale: -1
+          days-before-pr-close: -1
