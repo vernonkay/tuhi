@@ -7,15 +7,13 @@
 //! RAM) cannot. Editing on this engine (the full piece tree) is the next step;
 //! for now it is read-only, and the UI reflects that.
 
-use super::{Buffer, CaretPos, DocumentMeta, ViewportLine, MAX_VIEWPORT_LINE};
+use super::{Buffer, CaretPos, DocumentMeta, EditorError, ViewportLine, MAX_VIEWPORT_LINE};
 use memmap2::Mmap;
 use std::fs::File;
 use std::path::PathBuf;
 
 /// Files at or above this size open on the mmap engine instead of `RopeBuffer`.
 pub const MMAP_THRESHOLD_BYTES: u64 = 25 * 1024 * 1024;
-
-const READ_ONLY: &str = "this file is open read-only (large-file mode)";
 
 pub struct MmapBuffer {
     mmap: Option<Mmap>,
@@ -51,12 +49,12 @@ impl MmapBuffer {
 }
 
 impl Buffer for MmapBuffer {
-    fn open(&mut self, path: &str) -> Result<DocumentMeta, String> {
-        let file = File::open(path).map_err(|e| e.to_string())?;
+    fn open(&mut self, path: &str) -> Result<DocumentMeta, EditorError> {
+        let file = File::open(path)?;
         // SAFETY: a read-only map of a file we do not also write. If the file is
         // changed underneath us the view may be inconsistent; acceptable for a
         // read-only viewer.
-        let mmap = unsafe { Mmap::map(&file).map_err(|e| e.to_string())? };
+        let mmap = unsafe { Mmap::map(&file)? };
         let bytes = &mmap[..];
 
         let mut starts = Vec::with_capacity(1024);
@@ -73,7 +71,7 @@ impl Buffer for MmapBuffer {
         Ok(meta)
     }
 
-    fn viewport(&self, start: usize, count: usize) -> Result<Vec<ViewportLine>, String> {
+    fn viewport(&self, start: usize, count: usize) -> Result<Vec<ViewportLine>, EditorError> {
         let bytes = match &self.mmap {
             Some(m) => &m[..],
             None => return Ok(Vec::new()),
@@ -111,14 +109,14 @@ impl Buffer for MmapBuffer {
     }
 
     // Read-only: editing is not supported on the large-file engine yet.
-    fn insert(&mut self, _char_idx: usize, _text: &str) -> Result<DocumentMeta, String> {
-        Err(READ_ONLY.into())
+    fn insert(&mut self, _char_idx: usize, _text: &str) -> Result<DocumentMeta, EditorError> {
+        Err(EditorError::ReadOnly)
     }
-    fn delete(&mut self, _start: usize, _end: usize) -> Result<DocumentMeta, String> {
-        Err(READ_ONLY.into())
+    fn delete(&mut self, _start: usize, _end: usize) -> Result<DocumentMeta, EditorError> {
+        Err(EditorError::ReadOnly)
     }
-    fn save(&mut self, _path: Option<String>) -> Result<DocumentMeta, String> {
-        Err(READ_ONLY.into())
+    fn save(&mut self, _path: Option<String>) -> Result<DocumentMeta, EditorError> {
+        Err(EditorError::ReadOnly)
     }
     fn replace_all(
         &mut self,
@@ -126,19 +124,19 @@ impl Buffer for MmapBuffer {
         _regex: bool,
         _case_sensitive: bool,
         _replacement: &str,
-    ) -> Result<(DocumentMeta, usize), String> {
-        Err(READ_ONLY.into())
+    ) -> Result<(DocumentMeta, usize), EditorError> {
+        Err(EditorError::ReadOnly)
     }
     fn search(
         &self,
         _query: &str,
         _regex: bool,
         _case_sensitive: bool,
-    ) -> Result<Vec<[usize; 2]>, String> {
-        Err("find is not available in large-file mode yet".into())
+    ) -> Result<Vec<[usize; 2]>, EditorError> {
+        Err(EditorError::Other("find is not available in large-file mode yet".into()))
     }
-    fn read_range(&self, _start: usize, _end: usize) -> Result<String, String> {
-        Err(READ_ONLY.into())
+    fn read_range(&self, _start: usize, _end: usize) -> Result<String, EditorError> {
+        Err(EditorError::ReadOnly)
     }
 
     // Caret math is not used while read-only (the UI hides the caret), but the
