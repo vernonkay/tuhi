@@ -1,5 +1,6 @@
 # CI is the real gate — it re-runs the same `just check` developers run locally,
 # because local git hooks are skippable (--no-verify, merge commits). (Pattern from dt-platform.)
+# Cross-platform is a standing invariant, so `check` runs on all three OSes, not Linux only.
 name: ci
 on:
   pull_request:
@@ -12,12 +13,18 @@ permissions:
 
 jobs:
   check:
-    runs-on: ubuntu-latest
+    name: check (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
       - name: Install Linux Tauri deps
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev
@@ -28,9 +35,27 @@ jobs:
         with:
           node-version: 24
       - uses: extractions/setup-just@v2
+      - name: Install supply-chain tools (cargo-audit, cargo-deny)
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit,cargo-deny
       - run: cd app && npm ci
       - name: Run all checks (fail late — surface every problem)
         run: just check
       - name: Tests
         if: success() || failure()
         run: just test
+
+  attribution:
+    name: attribution (no AI trailers)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Scan new commits for AI attribution trailers
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          BEFORE_SHA: ${{ github.event.before }}
+        run: bash scripts/check/ci-no-ai-trailers.sh

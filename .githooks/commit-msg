@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# tuhi attribution policy: strip AI co-author/generated trailers; disclose AI
+# assistance once (README + AGENTS.md), not per-commit. This hook enforces it at
+# commit time; CI re-scans the pushed commits as a backstop (scripts/check/).
+# Installed by `git config core.hooksPath .githooks` (scripts/dev/setup.sh does this).
+set -uo pipefail
+msg_file="$1"
+
+if grep -qiE 'Co-Authored-By:[[:space:]].*(Claude|Anthropic|Copilot|GPT|Gemini)|Generated with \[?Claude Code' "$msg_file"; then
+    echo "x commit-msg: AI attribution trailer found." >&2
+    echo "  tuhi policy strips these and discloses AI assistance once in README/AGENTS.md." >&2
+    echo "  Remove the Co-Authored-By / 'Generated with Claude Code' line and commit again." >&2
+    exit 1
+fi
+exit 0

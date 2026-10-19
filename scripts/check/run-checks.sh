@@ -28,5 +28,20 @@ echo "── clippy -D warnings"
 echo "── tsc --noEmit"
 ( cd app && npx tsc --noEmit ) || fail=1
 
+# Supply-chain checks. Run only if the tools are installed (so a local `just check`
+# never hard-fails for lack of them); CI installs both, so CI always enforces.
+echo "── cargo audit"
+if command -v cargo-audit >/dev/null 2>&1; then
+    ( cd app/src-tauri && cargo audit ) || fail=1
+else
+    echo "   (skipped: cargo-audit not installed — 'cargo install cargo-audit')"
+fi
+echo "── cargo deny check"
+if command -v cargo-deny >/dev/null 2>&1; then
+    ( cd app/src-tauri && cargo deny check ) || fail=1
+else
+    echo "   (skipped: cargo-deny not installed — 'cargo install cargo-deny')"
+fi
+
 [ "$fail" -eq 0 ] && echo "All checks passed." || echo "Some checks failed."
 exit "$fail"

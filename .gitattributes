@@ -1,0 +1,4 @@
+# Git hooks and shell scripts must be checked out with LF endings: a CRLF shebang
+# (e.g. "#!/usr/bin/env bash\r") is not found on macOS/Linux and the script fails.
+.githooks/* text eol=lf
+*.sh text eol=lf

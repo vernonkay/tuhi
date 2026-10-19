@@ -1,4 +1,4 @@
-# notepad-refresh task runner.
+# tuhi task runner.
 # Rule (from dt-platform): recipes contain NO logic — they only call scripts or tools.
 # One discoverable surface (`just --list`), identical locally and in CI.
 

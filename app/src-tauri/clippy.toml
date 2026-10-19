@@ -1,0 +1,6 @@
+# Clippy configuration. Pairs with the workspace restriction lints (Cargo.toml
+# [lints]): allow unwrap/expect/panic inside tests, where they are idiomatic and
+# keep test code readable. (Inert until those restriction lints are enabled.)
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests = true
