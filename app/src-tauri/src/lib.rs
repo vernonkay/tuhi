@@ -36,6 +36,8 @@ pub fn run() {
             editor::refresh_highlights,
             editor::list_dir,
             editor::filter_lines,
+            editor::file_len,
+            editor::reload,
             editor::get_outline,
             editor::home_dir,
         ])
