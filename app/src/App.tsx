@@ -340,54 +340,31 @@ function App() {
     [folderPinned, folderRoot, revealPath],
   );
 
-  // Cold start: reopen the last folder the user was in (persisted across runs),
-  // falling back to the home folder, so the tree shows where they left off.
+  // Cold start: always open the tree at the home folder. Deterministic, never a
+  // surprise location. (Opening a file still re-roots the tree to show it in-session,
+  // and Ctrl+O's own dialog separately remembers your last directory.)
   useEffect(() => {
     void (async () => {
-      const list = async (p: string) => {
-        try {
-          return await invoke<DirEntry[]>("list_dir", { path: p });
-        } catch {
-          return null;
-        }
-      };
-      // Open the tree at the last directory we were in (the same place the OS
-      // Open dialog remembers), falling back to home on a genuinely fresh start.
       let root: string | null = null;
       try {
-        root = localStorage.getItem("tuhi.lastDir");
+        root = await invoke<string | null>("home_dir");
       } catch {
-        /* no persisted location */
+        root = null;
       }
-      let kids = root ? await list(root) : null;
-      if (!kids) {
-        try {
-          root = await invoke<string | null>("home_dir");
-        } catch {
-          root = null;
-        }
-        kids = root ? await list(root) : null;
+      if (!root) return;
+      let kids: DirEntry[];
+      try {
+        kids = await invoke<DirEntry[]>("list_dir", { path: root });
+      } catch {
+        return;
       }
-      if (!root || !kids) return;
       const r = root;
-      const k = kids;
       setFolderRoot((cur) => cur ?? r);
-      setDirCache((prev) => (r in prev ? prev : { ...prev, [r]: k }));
+      setDirCache((prev) => (r in prev ? prev : { ...prev, [r]: kids }));
       setTreeOpen(true);
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-
-  // Remember the current tree root as "last directory", so the next launch opens
-  // where we left off (mirroring the OS dialog). A fresh profile has no value here,
-  // so it lands on home.
-  useEffect(() => {
-    try {
-      if (folderRoot) localStorage.setItem("tuhi.lastDir", folderRoot);
-    } catch {
-      /* persistence is best-effort */
-    }
-  }, [folderRoot]);
 
   // Keep the active file scrolled into view in the tree when it or the layout changes.
   useEffect(() => {
@@ -508,12 +485,15 @@ function App() {
   const switchTab = useCallback(
     async (id: number) => {
       try {
-        await applyTabsState(await invoke<TabsState>("switch_tab", { id }));
+        const ts = await invoke<TabsState>("switch_tab", { id });
+        await applyTabsState(ts);
+        // Make the tree follow the active file, so it always reflects what you're on.
+        if (ts.meta?.path) void revealInTree(ts.meta.path);
       } catch (e) {
         setError(String(e));
       }
     },
-    [applyTabsState],
+    [applyTabsState, revealInTree],
   );
 
   const closeTab = useCallback(
@@ -1010,13 +990,14 @@ function App() {
             /* skip a file that has moved or been deleted */
           }
         }
-        // Re-select the previously active file if it reopened, then apply + reveal.
+        // Re-select the previously active file if it reopened, then apply. We do NOT
+        // reveal/re-root the tree here, so startup stays on home regardless of which
+        // files were reopened (opening a file later still reveals it).
         const restored = await invoke<TabsState>("list_tabs");
         if (!restored.tabs.length) return;
         const want = restored.tabs.find((t) => t.path && t.path === active);
         const applied = want ? await invoke<TabsState>("switch_tab", { id: want.id }) : restored;
         await applyTabsState(applied);
-        if (applied.meta?.path) void revealInTree(applied.meta.path);
       } catch {
         /* ignore */
       }
