@@ -270,6 +270,7 @@ function App() {
   const [dirCache, setDirCache] = useState<Record<string, DirEntry[]>>({});
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [outline, setOutline] = useState<OutlineItem[]>([]);
+  const [outlineQuery, setOutlineQuery] = useState("");
   const [filterOpen, setFilterOpen] = useState(false);
   const [filterQuery, setFilterQuery] = useState("");
   const [filterMatches, setFilterMatches] = useState<FilterMatch[]>([]);
@@ -1328,6 +1329,43 @@ function App() {
 
   return (
     <div className="shell">
+      <nav className="rail">
+        <button
+          className={`rail-btn${leftPanel === "files" ? " on" : ""}`}
+          onClick={() => setLeftPanel((v) => (v === "files" ? null : "files"))}
+          title="Files"
+        >
+          <IconTree />
+        </button>
+        <button
+          className={`rail-btn${leftPanel === "outline" ? " on" : ""}`}
+          onClick={() => setLeftPanel((v) => (v === "outline" ? null : "outline"))}
+          disabled={!meta}
+          title="Outline"
+        >
+          <IconList />
+        </button>
+        <button
+          className={`rail-btn${findOpen ? " on" : ""}`}
+          onClick={() => (findOpen ? closeFind() : openFind(false))}
+          disabled={!meta || readonly}
+          title="Find (Ctrl+F)"
+        >
+          <IconSearch />
+        </button>
+        <button
+          className={`rail-btn${filterOpen ? " on" : ""}`}
+          onClick={() => (filterOpen ? closeFilter() : openFilter())}
+          disabled={!meta}
+          title="Filter lines to view"
+        >
+          <IconFilter />
+        </button>
+        <button className="rail-btn" onClick={openPalette} title={`Command palette (${combo("P")})`}>
+          <IconCommand />
+        </button>
+      </nav>
+      <div className="main">
       <header className="topbar">
         <div className="brandcell">
           <Mark size={26} />
@@ -1367,42 +1405,6 @@ function App() {
         {busy && <span className="busy">Opening…</span>}
       </header>
       <div className="body">
-      <nav className="rail">
-        <button
-          className={`rail-btn${leftPanel === "files" ? " on" : ""}`}
-          onClick={() => setLeftPanel((v) => (v === "files" ? null : "files"))}
-          title="Files"
-        >
-          <IconTree />
-        </button>
-        <button
-          className={`rail-btn${leftPanel === "outline" ? " on" : ""}`}
-          onClick={() => setLeftPanel((v) => (v === "outline" ? null : "outline"))}
-          disabled={!meta}
-          title="Outline"
-        >
-          <IconList />
-        </button>
-        <button
-          className={`rail-btn${findOpen ? " on" : ""}`}
-          onClick={() => (findOpen ? closeFind() : openFind(false))}
-          disabled={!meta || readonly}
-          title="Find (Ctrl+F)"
-        >
-          <IconSearch />
-        </button>
-        <button
-          className={`rail-btn${filterOpen ? " on" : ""}`}
-          onClick={() => (filterOpen ? closeFilter() : openFilter())}
-          disabled={!meta}
-          title="Filter lines to view"
-        >
-          <IconFilter />
-        </button>
-        <button className="rail-btn" onClick={openPalette} title={`Command palette (${combo("P")})`}>
-          <IconCommand />
-        </button>
-      </nav>
       {leftPanel && (
         <aside className="filetree" style={{ flex: `0 0 ${treeWidth}px`, width: treeWidth }}>
           {leftPanel === "files" ? (
@@ -1424,9 +1426,25 @@ function App() {
           ) : (
             <>
               <div className="op-head">Outline</div>
+              {outline.length > 12 && (
+                <input
+                  className="op-filter"
+                  placeholder="Filter outline…"
+                  value={outlineQuery}
+                  onChange={(e) => setOutlineQuery(e.target.value)}
+                />
+              )}
               <div className="op-body">
-                {outline.length ? (
-                  outline.map((o, i) => (
+                {(() => {
+                  const q = outlineQuery.trim().toLowerCase();
+                  const rows = q ? outline.filter((o) => o.title.toLowerCase().includes(q)) : outline;
+                  if (!outline.length) {
+                    return <p className="op-empty">{meta ? "No headings" : "No file open"}</p>;
+                  }
+                  if (!rows.length) {
+                    return <p className="op-empty">No matches</p>;
+                  }
+                  return rows.map((o, i) => (
                     <div
                       key={`${o.line}-${i}`}
                       className={`op-row lvl${o.level}`}
@@ -1435,10 +1453,8 @@ function App() {
                     >
                       {o.title}
                     </div>
-                  ))
-                ) : (
-                  <p className="op-empty">{meta ? "No headings" : "No file open"}</p>
-                )}
+                  ));
+                })()}
               </div>
             </>
           )}
@@ -1656,6 +1672,7 @@ function App() {
       <span ref={measureRef} className="measure" aria-hidden="true">
         00000000000000000000
       </span>
+      </div>
       </div>
       </div>
       {paletteOpen && (
