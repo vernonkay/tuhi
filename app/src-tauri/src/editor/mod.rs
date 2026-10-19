@@ -15,10 +15,11 @@
 
 use ropey::Rope;
 use serde::Serialize;
-use std::fs::File;
-use std::io::{BufReader, BufWriter};
+use std::fs::{self, File};
+use std::io::{self, BufReader, BufWriter, Write};
 use std::path::PathBuf;
 use std::sync::Mutex;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::State;
 
 mod highlight;
@@ -323,13 +324,46 @@ impl Buffer for RopeBuffer {
             Some(t) => t,
             None => return Err("no path to save to".into()),
         };
-        // Note: not yet atomic — a failed write truncates the original. Atomic
-        // save (temp -> fsync -> rename) is an M1 core-correctness item.
-        let file = File::create(&target).map_err(|e| e.to_string())?;
-        self.rope
-            .write_to(BufWriter::new(file))
-            .map_err(|e| e.to_string())?;
-        self.path = Some(PathBuf::from(&target));
+        let target_path = PathBuf::from(&target);
+
+        // Atomic save: write a sibling temp file, flush it to disk, then rename over
+        // the target. A write error or crash leaves the original untouched — rename
+        // is atomic on the same filesystem, and std::fs::rename replaces the
+        // destination on Windows too. (The old path truncated the original up-front.)
+        let dir = match target_path.parent() {
+            Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+            _ => PathBuf::from("."),
+        };
+        let file_name = target_path.file_name().and_then(|n| n.to_str()).unwrap_or("tuhi");
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let tmp_path = dir.join(format!(".{file_name}.tuhi-tmp-{}-{nanos}", std::process::id()));
+
+        // Write the rope to the temp file and fsync before the rename.
+        let write = || -> io::Result<()> {
+            let mut w = BufWriter::new(File::create(&tmp_path)?);
+            self.rope.write_to(&mut w)?;
+            w.flush()?;
+            w.into_inner().map_err(io::IntoInnerError::into_error)?.sync_all()
+        };
+        if let Err(e) = write() {
+            let _ = fs::remove_file(&tmp_path);
+            return Err(format!("save failed, original left intact: {e}"));
+        }
+
+        // Carry the existing file's permissions across the replace (best effort).
+        if let Ok(meta) = fs::metadata(&target_path) {
+            let _ = fs::set_permissions(&tmp_path, meta.permissions());
+        }
+
+        if let Err(e) = fs::rename(&tmp_path, &target_path) {
+            let _ = fs::remove_file(&tmp_path);
+            return Err(format!("save failed on rename, original left intact: {e}"));
+        }
+
+        self.path = Some(target_path);
         self.dirty = false;
         Ok(self.make_meta())
     }
@@ -774,5 +808,63 @@ mod tests {
         // A line index past the end clamps to the last line.
         let far = b.pos_to_char(999, 0);
         assert_eq!(far, b.rope.line_to_char(b.rope.len_lines() - 1));
+    }
+
+    // A unique path in the temp dir for a save test (no tempfile crate dependency).
+    fn tmp_target(tag: &str) -> PathBuf {
+        let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        std::env::temp_dir().join(format!("tuhi-{tag}-{}-{nanos}", std::process::id()))
+    }
+
+    // Any leftover ".{base}.tuhi-tmp-*" siblings from an atomic save (scoped to `base`
+    // so parallel tests don't interfere).
+    fn temp_leftovers(dir: &std::path::Path, base: &str) -> Vec<String> {
+        fs::read_dir(dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains(base) && n.contains(".tuhi-tmp-"))
+            .collect()
+    }
+
+    #[test]
+    fn save_writes_then_overwrites_atomically() {
+        let path = tmp_target("save").with_extension("txt");
+        let p = path.display().to_string();
+        let dir = path.parent().unwrap().to_path_buf();
+        let base = path.file_name().unwrap().to_string_lossy().into_owned();
+
+        let mut b = RopeBuffer::default();
+        b.insert(0, "first version\n").unwrap();
+        let meta = b.save(Some(p.clone())).unwrap();
+        assert!(!meta.dirty);
+        assert_eq!(fs::read_to_string(&path).unwrap(), "first version\n");
+
+        // Overwrite in place: the rename replaces the original.
+        b.insert(b.rope.len_chars(), "second line\n").unwrap();
+        b.save(Some(p.clone())).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "first version\nsecond line\n");
+
+        assert!(temp_leftovers(&dir, &base).is_empty(), "temp files left behind");
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn failed_save_leaves_original_intact() {
+        // Target an existing directory so the final rename fails: the save must error,
+        // must not destroy anything, and must not leave a temp file behind.
+        let sub = tmp_target("save-dir");
+        fs::create_dir(&sub).unwrap();
+        let dir = sub.parent().unwrap().to_path_buf();
+        let base = sub.file_name().unwrap().to_string_lossy().into_owned();
+
+        let mut b = RopeBuffer::default();
+        b.insert(0, "data\n").unwrap();
+        let res = b.save(Some(sub.display().to_string()));
+
+        assert!(res.is_err(), "saving onto a directory should fail");
+        assert!(sub.is_dir(), "the original must still be there after a failed save");
+        assert!(temp_leftovers(&dir, &base).is_empty(), "temp files left behind");
+        let _ = fs::remove_dir(&sub);
     }
 }
