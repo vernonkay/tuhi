@@ -1,10 +1,10 @@
-# Tuhi
+# tuhi — a fast, cross-platform text & Markdown editor
 
 A modern, fast, **cross-platform**, open-source text/code editor that also treats **Markdown** as a first-class citizen, the loved parts of Notepad++ rebuilt portable and modern, without becoming an IDE or a knowledge-base.
 
-> **Tuhi** is te reo Māori for *to write, to inscribe, to record.* Working name; the one small known collision is an inactive GNOME tablet utility of the same name (not an editor).
+> **tuhi** is te reo Māori for *to write, to inscribe, to record.* The one small known collision is an inactive GNOME tablet utility of the same name (not an editor).
 
-Vernon Kay's first open-source project. Personal, not DataTorque IP, not on `datatorque.ghe.com`; when it goes public it goes to a personal GitHub.
+Vernon Kay's first open-source project. Personal, developed independently; its public home is a personal GitHub account.
 
 ## Why this exists (the thesis)
 
@@ -12,7 +12,7 @@ Line the editor field up against five attributes, fast/native (not Electron), tr
 
 ## Status (2026-10-19)
 
-Early build. The **editing core is in and proven**: a Rust `ropey` rope buffer with Tauri commands, compiling, unit tests green. Next: the front-end viewport renderer. See `BACKLOG.md`.
+Early but usable. A Rust editing core (a `ropey` rope buffer, plus a read-only memory-mapped engine for huge files) sits behind a `Buffer` trait, with a virtualised web-view that fetches only the on-screen lines: open / edit / save, tabs, a file tree, syntax highlighting, find/replace. Heading for a first public release (**v0.1.0**) that leads with large-file handling. A public `ROADMAP.md` lands before release.
 
 ## Tech stack
 
@@ -25,7 +25,7 @@ Early build. The **editing core is in and proven**: a Rust `ropey` rope buffer w
 ```
 tuhi/
 ├── README.md
-├── BACKLOG.md                # task list (the next things to build)
+├── LICENSE-MIT / LICENSE-APACHE
 ├── docs/                     # research + scope ("base point scope")
 │   ├── 00-current-state-notepadpp.md
 │   ├── 01-user-research.md
@@ -44,12 +44,16 @@ tuhi/
 
 ## Working on it
 
-This repo **is** the project's home. Start a session from this directory (not from a DataTorque workspace). Bootstrap once with `just setup` (or `npm install` in `app/`), then `just dev` to run, `just check` before pushing.
+Bootstrap once with `just setup` (installs the git hooks and the frontend deps; or `npm install` in `app/`), then `just dev` to run and `just check` before pushing. Builds write to a separate checkout outside the synced drive, so build output doesn't thrash cloud sync.
 
 ## Licence
 
-Intended dual **MIT OR Apache-2.0** (permissive, Rust-ecosystem norm). Canonical LICENSE files to be added. Not yet public.
+Dual-licensed under **MIT OR Apache-2.0**, at your option (permissive, the Rust-ecosystem norm). See [`LICENSE-MIT`](LICENSE-MIT) and [`LICENSE-APACHE`](LICENSE-APACHE). Contributions are accepted under the same dual licence.
+
+## Built with AI assistance
+
+tuhi is built by Vernon Kay with heavy use of AI assistance (Claude Code). The code, the decisions and the responsibility are the author's; the AI is a tool, disclosed here rather than credited per commit (see `AGENTS.md`).
 
 ## Provenance
 
-Research strands run 2026-10-18 via web search/fetch and a read of DataTorque's `dt-platform` (for generic engineering discipline only, no DT code). Sources cited inline in `docs/`.
+Research strands run 2026-10-18 via web search and fetch, plus a read of a prior codebase for generic engineering discipline only (no third-party code or config lifted). Sources cited inline in `docs/`.

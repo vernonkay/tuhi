@@ -30,4 +30,12 @@ A concise "where to look" + working boundaries file. Authoritative detail lives 
 - British English. No emojis in code or docs. Conventional Commits for messages.
 
 ## Attribution policy
-TBD (open decision — see `docs/04-product-scope.md`). Once set, it is enforced mechanically via a commit-msg hook + a CI re-scan, the same way dt-platform enforces its own (opposite) policy.
+**Decided 2026-10-19: strip per-commit AI trailers; disclose AI assistance once.** No
+`Co-Authored-By: Claude` / `Generated with Claude Code` lines in commit messages or PRs.
+Enforced mechanically: the `.githooks/commit-msg` hook rejects them at commit time
+(installed by `just setup`), and CI re-scans each PR/push's new commits
+(`scripts/check/ci-no-ai-trailers.sh`). The single disclosure lives in `README.md`.
+
+> tuhi is built by Vernon Kay with heavy use of AI assistance (Claude Code). The code,
+> decisions and responsibility are the author's; the AI is a tool, disclosed here rather
+> than credited per commit.

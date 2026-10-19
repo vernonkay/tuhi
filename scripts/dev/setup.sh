@@ -8,6 +8,11 @@ echo "Checking toolchain..."
 command -v cargo >/dev/null || { echo "Install Rust: https://rustup.rs"; exit 1; }
 command -v node  >/dev/null || { echo "Install Node 20+: https://nodejs.org"; exit 1; }
 
+# Git hooks: enforce the attribution policy (no AI trailers) at commit time.
+echo "Installing git hooks (.githooks)..."
+git config core.hooksPath .githooks
+chmod +x .githooks/* 2>/dev/null || true
+
 # Tauri CLI + just (installed only if missing)
 command -v just >/dev/null || cargo install just
 cargo install tauri-cli --version "^2" 2>/dev/null || true
