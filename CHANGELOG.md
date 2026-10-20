@@ -6,7 +6,43 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-## [0.1.0] — unreleased
+## [0.1.1] — 2026-10-20
+
+A correctness and polish release. **Upgrade strongly recommended:** 0.1.0 could corrupt
+text under fast typing, so this supersedes it.
+
+### Fixed
+
+- **Typing corruption (critical).** Fast or sustained typing could insert characters at
+  the wrong position and out of order (e.g. "the quick…" landing as "The qu rbkci"),
+  because each keystroke read the caret from React state that lagged the buffer by two
+  IPC round-trips. The caret, anchor and length are now tracked synchronously, edits are
+  serialised, and typed characters are coalesced into one ordered insert per frame.
+- **Caret alignment.** The caret is positioned by measuring the real rendered text of its
+  line, so it no longer drifts right at the start of a line or left by the end.
+- **Startup view** when a session is restored: the explorer now shows the active file's
+  folder instead of the welcome buttons.
+
+### Added
+
+- **Settings v1**: a preferences panel with a theme override (Auto / Light / Dark) and
+  management of the follow/tail highlighter rules.
+- **Explorer**: a welcome view with Open File / Open Folder and a Recent list when nothing
+  is open, and parent-folder navigation.
+
+### Performance
+
+- Large files (over the 2 MB highlight cap) no longer re-run the whole-document outline
+  and highlight passes after every edit, which was stalling typing on big files.
+- Fewer IPC round-trips per edit (insert now returns the caret; one round-trip per typing
+  frame instead of several per keystroke).
+
+### Changed
+
+- Dependency bumps: `two-face`, `typescript`, and the `checkout`, `setup-node` and
+  `setup-just` GitHub Actions.
+
+## [0.1.0] — 2026-10-19
 
 First public release: a fast, cross-platform editor that leads with large-file handling.
 
@@ -33,5 +69,6 @@ First public release: a fast, cross-platform editor that leads with large-file h
   and session restore (reopens the files you had open).
 - A restrictive Content-Security-Policy.
 
-[Unreleased]: https://github.com/vernonkay/tuhi/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/vernonkay/tuhi/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/vernonkay/tuhi/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/vernonkay/tuhi/releases/tag/v0.1.0
