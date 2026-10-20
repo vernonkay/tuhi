@@ -28,6 +28,7 @@ pub fn run() {
             editor::pretty_print,
             editor::pos_to_char,
             editor::char_to_pos,
+            editor::word_boundary,
             editor::read_range,
             editor::search,
             editor::replace_all,

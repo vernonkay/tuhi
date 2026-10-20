@@ -126,6 +126,11 @@ pub trait Buffer: Send {
     fn pos_to_char(&self, line: usize, col: usize) -> usize;
     /// The (line, col) a global character index falls on, clamped to the document.
     fn char_to_pos(&self, char_idx: usize) -> CaretPos;
+    /// The next word boundary from `char_idx` in the given direction, for word-wise
+    /// caret movement and selection. Default: no movement (engines without a char index).
+    fn word_boundary(&self, char_idx: usize, _forward: bool) -> usize {
+        char_idx
+    }
     /// The text in the character range `[start, end)` (for copy/cut).
     fn read_range(&self, start: usize, end: usize) -> Result<String, EditorError>;
     /// Find all matches; returns character ranges `[start, end)`.
@@ -590,6 +595,52 @@ impl Buffer for RopeBuffer {
             line,
             col: idx - self.rope.line_to_char(line),
         }
+    }
+
+    fn word_boundary(&self, char_idx: usize, forward: bool) -> usize {
+        // Classify each character so a word move stops at the transition between runs of
+        // whitespace, word chars (alphanumeric or `_`) and punctuation — the usual
+        // Ctrl+Arrow behaviour. Forward: skip whitespace, then skip the following run.
+        // Backward: skip whitespace to the left, then skip the preceding run.
+        #[derive(PartialEq)]
+        enum Cls {
+            Ws,
+            Word,
+            Punct,
+        }
+        fn classify(c: char) -> Cls {
+            if c.is_whitespace() {
+                Cls::Ws
+            } else if c.is_alphanumeric() || c == '_' {
+                Cls::Word
+            } else {
+                Cls::Punct
+            }
+        }
+        let n = self.rope.len_chars();
+        let mut i = char_idx.min(n);
+        if forward {
+            while i < n && classify(self.rope.char(i)) == Cls::Ws {
+                i += 1;
+            }
+            if i < n {
+                let cls = classify(self.rope.char(i));
+                while i < n && classify(self.rope.char(i)) == cls {
+                    i += 1;
+                }
+            }
+        } else {
+            while i > 0 && classify(self.rope.char(i - 1)) == Cls::Ws {
+                i -= 1;
+            }
+            if i > 0 {
+                let cls = classify(self.rope.char(i - 1));
+                while i > 0 && classify(self.rope.char(i - 1)) == cls {
+                    i -= 1;
+                }
+            }
+        }
+        i
     }
 
     fn read_range(&self, start: usize, end: usize) -> Result<String, EditorError> {
@@ -1128,6 +1179,20 @@ pub fn char_to_pos(char_idx: usize, state: State<EditorState>) -> Result<CaretPo
 }
 
 #[tauri::command]
+pub fn word_boundary(
+    char_idx: usize,
+    forward: bool,
+    state: State<EditorState>,
+) -> Result<usize, EditorError> {
+    Ok(state
+        .0
+        .lock()
+        .map_err(|_| EditorError::LockPoisoned)?
+        .active_buffer()?
+        .word_boundary(char_idx, forward))
+}
+
+#[tauri::command]
 pub fn read_range(
     start: usize,
     end: usize,
@@ -1333,6 +1398,19 @@ mod tests {
         let after_delete = b.delete(0, 1).unwrap();
         assert!(after_delete.dirty);
         assert_eq!(b.viewport(0, 1).unwrap()[0].text, "bc");
+    }
+
+    #[test]
+    fn word_boundary_moves_across_classes() {
+        let mut b = RopeBuffer::default();
+        // h0..o4  sp5  w6.._11 4 12 2 13  sp14  f15 o16 o17 .18 b19 a20 r21 (len 22)
+        b.insert(0, "hello world_42 foo.bar").unwrap();
+        assert_eq!(b.word_boundary(0, true), 5, "end of first word");
+        assert_eq!(b.word_boundary(5, true), 14, "skip space then the whole word_42");
+        assert_eq!(b.word_boundary(22, false), 19, "back to start of trailing word");
+        assert_eq!(b.word_boundary(19, false), 18, "punctuation is its own class");
+        assert_eq!(b.word_boundary(0, false), 0, "no move before the start");
+        assert_eq!(b.word_boundary(22, true), 22, "no move past the end");
     }
 
     #[test]
