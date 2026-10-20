@@ -329,7 +329,7 @@ function App() {
 
   // Studio chrome: one left panel showing Files OR Outline (rail switches it), plus
   // the command palette. `null` = the left panel is collapsed.
-  const [leftPanel, setLeftPanel] = useState<"files" | "outline" | null>("files");
+  const [leftPanel, setLeftPanel] = useState<"files" | "outline" | null>(null);
   const [treeWidth, setTreeWidth] = useState<number>(() => {
     try {
       const w = Number(localStorage.getItem("tuhi.treeWidth"));
@@ -1853,25 +1853,20 @@ function App() {
   };
 
   return (
-    <div className="shell">
-      <nav className="rail">
+    <div className="shell tg">
+      <aside className="gut gut-l">
+        <Mark size={22} />
         <button
-          className={`rail-btn${leftPanel === "files" ? " on" : ""}`}
+          className={`gut-aff${leftPanel === "files" ? " on" : ""}`}
           onClick={() => setLeftPanel((v) => (v === "files" ? null : "files"))}
           title="Files"
         >
           <IconTree />
         </button>
+        <span className={`gut-dot${leftPanel === "files" ? " on" : ""}`} />
+        <div className="gut-sp" />
         <button
-          className={`rail-btn${leftPanel === "outline" ? " on" : ""}`}
-          onClick={() => setLeftPanel((v) => (v === "outline" ? null : "outline"))}
-          disabled={!meta}
-          title="Outline"
-        >
-          <IconList />
-        </button>
-        <button
-          className={`rail-btn${findOpen ? " on" : ""}`}
+          className={`gut-aff${findOpen ? " on" : ""}`}
           onClick={() => (findOpen ? closeFind() : openFind(false))}
           disabled={!meta || readonly}
           title="Find (Ctrl+F)"
@@ -1879,27 +1874,23 @@ function App() {
           <IconSearch />
         </button>
         <button
-          className={`rail-btn${filterOpen ? " on" : ""}`}
+          className={`gut-aff${filterOpen ? " on" : ""}`}
           onClick={() => (filterOpen ? closeFilter() : openFilter())}
           disabled={!meta}
           title="Filter lines to view"
         >
           <IconFilter />
         </button>
-        <button className="rail-btn" onClick={openPalette} title={`Command palette (${combo("P")})`}>
+        <button className="gut-aff" onClick={openPalette} title={`Command palette (${combo("P")})`}>
           <IconCommand />
         </button>
-        <div className="rail-spacer" />
-        <button className="rail-btn" onClick={() => setSettingsOpen(true)} title="Settings">
+        <button className="gut-aff" onClick={() => setSettingsOpen(true)} title="Settings">
           <IconSettings />
         </button>
-      </nav>
+        <div className="gut-tag">FILES</div>
+      </aside>
       <div className="main">
       <header className="topbar">
-        <div className="brandcell">
-          <Mark size={26} />
-          <span className="brand-word">tuhi</span>
-        </div>
         <div className="tabstrip">
           {tabs.map((t) => (
             <div
@@ -1935,7 +1926,10 @@ function App() {
       </header>
       <div className="body">
       {leftPanel && (
-        <aside className="filetree" style={{ flex: `0 0 ${treeWidth}px`, width: treeWidth }}>
+        <aside
+          className={`over ${leftPanel === "outline" ? "over-r" : "over-l"}`}
+          style={{ width: treeWidth }}
+        >
           {leftPanel === "files" ? (
             <>
               <div className="ft-head">
@@ -1947,6 +1941,7 @@ function App() {
                 <button className="ft-icn" onClick={() => void openFolder()} title="Open folder…">
                   <IconFolder />
                 </button>
+                <button className="over-close" onClick={() => setLeftPanel(null)} title="Close">×</button>
               </div>
               <div className="ft-body">
                 {folderRoot ? (
@@ -1995,7 +1990,10 @@ function App() {
             </>
           ) : (
             <>
-              <div className="op-head">Outline</div>
+              <div className="op-head" style={{ display: "flex", alignItems: "center" }}>
+                Outline
+                <button className="over-close" style={{ marginLeft: "auto" }} onClick={() => setLeftPanel(null)} title="Close">×</button>
+              </div>
               {outline.length > 12 && (
                 <input
                   className="op-filter"
@@ -2035,16 +2033,14 @@ function App() {
               </div>
             </>
           )}
+          <div
+            className="ft-resizer"
+            onMouseDown={startTreeResize}
+            title="Drag to resize"
+            role="separator"
+            aria-orientation="vertical"
+          />
         </aside>
-      )}
-      {leftPanel && (
-        <div
-          className="ft-resizer"
-          onMouseDown={startTreeResize}
-          title="Drag to resize"
-          role="separator"
-          aria-orientation="vertical"
-        />
       )}
       <div className="app">
 
@@ -2253,6 +2249,19 @@ function App() {
       </div>
       </div>
       </div>
+      <aside className="gut gut-r">
+        <button
+          className={`gut-aff${leftPanel === "outline" ? " on" : ""}`}
+          onClick={() => setLeftPanel((v) => (v === "outline" ? null : "outline"))}
+          disabled={!meta}
+          title="Outline"
+        >
+          <IconList />
+        </button>
+        <span className={`gut-dot${leftPanel === "outline" ? " on" : ""}`} />
+        <div className="gut-sp" />
+        <div className="gut-tag">OUTLINE</div>
+      </aside>
       {paletteOpen && (
         <div className="palette-overlay" onMouseDown={() => setPaletteOpen(false)}>
           <div className="palette-modal" onMouseDown={(e) => e.stopPropagation()}>
