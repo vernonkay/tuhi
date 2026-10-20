@@ -34,6 +34,7 @@ pub fn run() {
             editor::switch_tab,
             editor::close_tab,
             editor::refresh_highlights,
+            editor::set_theme,
             editor::list_dir,
             editor::filter_lines,
             editor::file_len,

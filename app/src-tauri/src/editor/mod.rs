@@ -136,6 +136,9 @@ pub trait Buffer: Send {
     fn meta(&self) -> DocumentMeta;
     /// Recompute cached syntax highlighting (no-op where the engine doesn't highlight).
     fn rehighlight(&mut self);
+    /// Switch the highlight theme (dark vs light) and re-highlight in place. No-op
+    /// where the engine doesn't highlight (e.g. the large-file mmap buffer).
+    fn set_dark(&mut self, _dark: bool) {}
     /// Document outline (markdown headings, or simple code symbols); empty where
     /// the engine doesn't support it.
     fn outline(&self) -> Vec<OutlineItem> {
@@ -628,6 +631,11 @@ impl Buffer for RopeBuffer {
         } else {
             self.highlights = Vec::new();
         }
+    }
+
+    fn set_dark(&mut self, dark: bool) {
+        self.dark = dark;
+        self.rehighlight();
     }
 
     fn outline(&self) -> Vec<OutlineItem> {
@@ -1157,6 +1165,22 @@ pub fn refresh_highlights(state: State<EditorState>) -> Result<DocumentMeta, Edi
     let b = reg.active_buffer_mut()?;
     b.rehighlight();
     Ok(b.meta())
+}
+
+/// Switch the syntax-highlight theme (dark vs light) across all open tabs,
+/// re-highlighting each in place (no disk reload, so unsaved edits are safe).
+/// Returns the active document's meta so the viewport refreshes, or `None` when
+/// nothing is open.
+#[tauri::command]
+pub fn set_theme(
+    dark: bool,
+    state: State<EditorState>,
+) -> Result<Option<DocumentMeta>, EditorError> {
+    let mut reg = state.0.lock().map_err(|_| EditorError::LockPoisoned)?;
+    for tab in reg.tabs.iter_mut() {
+        tab.buffer.set_dark(dark);
+    }
+    Ok(reg.active_buffer().ok().map(|b| b.meta()))
 }
 
 #[cfg(test)]
