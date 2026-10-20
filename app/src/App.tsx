@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { readText, writeText } from "@tauri-apps/plugin-clipboard-manager";
 import "./App.css";
@@ -1871,8 +1872,8 @@ function App() {
         <div className="gut-tag">FILES</div>
       </aside>
       <div className="main">
-      <header className="topbar">
-        <div className="tabstrip">
+      <header className="topbar" data-tauri-drag-region>
+        <div className="tabstrip" data-tauri-drag-region>
           {tabs.map((t) => (
             <div
               key={t.id}
@@ -1904,6 +1905,23 @@ function App() {
           ))}
         </div>
         {busy && <span className="busy">Opening…</span>}
+        <div className="winctl">
+          <button className="wc" onClick={() => void getCurrentWindow().minimize()} title="Minimize" aria-label="Minimize">
+            <svg viewBox="0 0 10 10" aria-hidden>
+              <path d="M1 5h8" />
+            </svg>
+          </button>
+          <button className="wc" onClick={() => void getCurrentWindow().toggleMaximize()} title="Maximize" aria-label="Maximize">
+            <svg viewBox="0 0 10 10" aria-hidden>
+              <rect x="1" y="1" width="8" height="8" rx="1.2" />
+            </svg>
+          </button>
+          <button className="wc wc-close" onClick={() => void getCurrentWindow().close()} title="Close" aria-label="Close">
+            <svg viewBox="0 0 10 10" aria-hidden>
+              <path d="M1 1l8 8M9 1l-8 8" />
+            </svg>
+          </button>
+        </div>
       </header>
       <div className="body">
       {leftPanel && (
