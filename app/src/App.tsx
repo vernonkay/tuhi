@@ -212,6 +212,24 @@ const IS_MAC =
 const combo = (key: string) => (IS_MAC ? `⌘${key}` : `Ctrl+${key}`);
 
 /** The caret-over-a-line brand mark (docs/brand.md). Coral caret, ink line. */
+function Mark({ size = 20 }: { size?: number }) {
+  return (
+    <svg
+      className="mark"
+      width={size}
+      height={size}
+      viewBox="0 0 64 64"
+      fill="none"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M14 40 L32 18 L50 40" stroke="var(--coral)" strokeWidth={7} />
+      <path d="M14 52 H50" stroke="currentColor" strokeWidth={6} />
+    </svg>
+  );
+}
+
 const iconProps = {
   viewBox: "0 0 24 24",
   fill: "none",
@@ -1813,6 +1831,9 @@ function App() {
   return (
     <div className="shell tg">
       <aside className="gut gut-l">
+        <div className="gut-cap">
+          <Mark size={20} />
+        </div>
         <button
           className={`gut-dot-btn${leftPanel === "files" ? " on" : ""}`}
           onClick={() => {
@@ -2249,6 +2270,7 @@ function App() {
       </div>
       </div>
       <aside className="gut gut-r">
+        <div className="gut-cap" />
         <button
           className={`gut-dot-btn${leftPanel === "outline" ? " on" : ""}`}
           onClick={() => {

@@ -660,10 +660,18 @@ html, body, #root {
 .shell.tg { position: relative; }
 .gut {
   flex: 0 0 40px; width: 40px; background: var(--panel);
-  display: flex; flex-direction: column; align-items: center; gap: 9px; padding: 10px 0;
+  display: flex; flex-direction: column; align-items: center; gap: 9px; padding: 0 0 10px;
 }
 .gut-l { border-right: 1px solid var(--border); }
 .gut-r { border-left: 1px solid var(--border); }
+/* Top cap, same height + border as the title bar: the logo on the left, empty on the
+   right, so the dots below start at the same line across both gutters and the editor. */
+.gut-cap {
+  align-self: stretch; height: 38px; flex: 0 0 38px;
+  display: grid; place-items: center;
+  border-bottom: 1px solid var(--border); margin-bottom: 4px;
+}
+.gut-cap .mark { color: var(--ink); }
 /* Each menu option is a dot; the name floats in on hover (so dots stay discoverable). */
 .gut-dot-btn {
   position: relative; width: 30px; height: 22px; display: grid; place-items: center;
