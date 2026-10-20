@@ -36,6 +36,12 @@ interface CaretPos {
   col: number;
 }
 
+/** Mirror of the Rust `EditResult`: doc meta plus the caret after an insert. */
+interface EditResult {
+  meta: DocumentMeta;
+  caret: CaretPos;
+}
+
 /** Mirror of the Rust `EditOutcome`: doc meta after undo/redo + the caret target
  *  (`caret` is null when there was nothing to undo/redo). */
 interface EditOutcome {
@@ -509,8 +515,22 @@ function App() {
   const [caretLeft, setCaretLeft] = useState<number | null>(null);
   const hlTimer = useRef<number | null>(null);
 
+  // --- Synchronous edit pipeline ---
+  // React state updates a frame late, so a fast burst of keystrokes would each read a
+  // stale caret and insert characters at the wrong offset, out of order (the "scramble"
+  // bug). We keep the caret, anchor and char count in refs that update synchronously,
+  // coalesce typed characters into one buffered insert per animation frame, and run
+  // every mutation through a promise chain so edits apply strictly in order and never
+  // overlap in flight.
+  const caretRef = useRef<Caret | null>(null);
+  const anchorRef = useRef<number | null>(null);
+  const charCountRef = useRef(0);
+  const typeBufRef = useRef(""); // characters typed but not yet sent to Rust
+  const typeAtRef = useRef(0); // char index where the buffered run begins
+  const flushRaf = useRef<number | null>(null); // pending requestAnimationFrame handle
+  const editChain = useRef<Promise<void>>(Promise.resolve()); // serialises all edits
+
   const lineCount = meta?.line_count ?? 0;
-  const charCount = meta?.char_count ?? 0;
   const readonly = meta?.readonly ?? false;
 
   useEffect(() => {
@@ -589,7 +609,9 @@ function App() {
     async (idx: number) => {
       try {
         const pos = await invoke<CaretPos>("char_to_pos", { charIdx: idx });
-        setCaret({ idx, line: pos.line, col: pos.col });
+        const landed = { idx, line: pos.line, col: pos.col };
+        caretRef.current = landed;
+        setCaret(landed);
         ensureCaretVisible(pos.line);
       } catch (e) {
         setError(String(e));
@@ -664,21 +686,85 @@ function App() {
     }, 180);
   }, [refreshOutline]);
 
+  // Keep the synchronous refs mirrored to the React state for the call sites that set
+  // caret/anchor outside the edit pipeline (open, switch tab, click, find, undo).
+  useEffect(() => {
+    caretRef.current = caret;
+  }, [caret]);
+  useEffect(() => {
+    anchorRef.current = anchor;
+  }, [anchor]);
+  useEffect(() => {
+    if (meta) charCountRef.current = meta.char_count;
+  }, [meta]);
+
   const hasSelection = () => anchor !== null && caret !== null && anchor !== caret.idx;
   const selRange = (): [number, number] | null => {
     if (!hasSelection() || !caret) return null;
     return [Math.min(anchor!, caret.idx), Math.max(anchor!, caret.idx)];
   };
 
-  // Delete the active selection; return the char index the caret should land on.
-  const deleteSelection = useCallback(async (): Promise<number> => {
-    const r = selRange();
-    if (!r || !caret) return caret?.idx ?? 0;
-    const [a, b] = r;
-    setMeta(await invoke<DocumentMeta>("delete_range", { start: a, end: b }));
+  // Selection range from the synchronous refs (used inside serialized edit ops).
+  const selRangeRef = (): [number, number] | null => {
+    const c = caretRef.current;
+    const a = anchorRef.current;
+    if (!c || a === null || a === c.idx) return null;
+    return [Math.min(a, c.idx), Math.max(a, c.idx)];
+  };
+
+  // Run a mutation serialized after every edit queued before it.
+  const enqueue = useCallback((fn: () => Promise<void>): Promise<void> => {
+    const next = editChain.current.then(fn).catch((e) => setError(String(e)));
+    editChain.current = next;
+    return next;
+  }, []);
+
+  // Send the buffered typed run as a single ordered insert. The optimistic caret is
+  // already correct (plain characters only advance the column), so it is not touched.
+  const flushTyping = useCallback((): Promise<void> => {
+    const text = typeBufRef.current;
+    if (!text) return editChain.current;
+    const at = typeAtRef.current;
+    typeBufRef.current = "";
+    return enqueue(async () => {
+      const res = await invoke<EditResult>("insert_text", { charIdx: at, text });
+      setMeta(res.meta);
+      charCountRef.current = res.meta.char_count;
+      scheduleRehighlight();
+    });
+  }, [enqueue, scheduleRehighlight]);
+
+  // Flush immediately (cancel the pending frame). Non-typing ops call this first so the
+  // buffered characters are queued ahead of them and ordering is preserved.
+  const flushTypingNow = useCallback((): Promise<void> => {
+    if (flushRaf.current != null) {
+      cancelAnimationFrame(flushRaf.current);
+      flushRaf.current = null;
+    }
+    return flushTyping();
+  }, [flushTyping]);
+
+  const scheduleFlush = useCallback(() => {
+    if (flushRaf.current != null) return;
+    flushRaf.current = requestAnimationFrame(() => {
+      flushRaf.current = null;
+      void flushTyping();
+    });
+  }, [flushTyping]);
+
+  // Delete the active selection inside an already-serialized op; returns the char index
+  // the caret should land on, and updates meta/anchor/count. Reads the live refs.
+  const deleteSelectionInline = async (): Promise<number> => {
+    const c = caretRef.current;
+    const sel = selRangeRef();
+    if (!sel || !c) return c?.idx ?? 0;
+    const m = await invoke<DocumentMeta>("delete_range", { start: sel[0], end: sel[1] });
+    setMeta(m);
+    charCountRef.current = m.char_count;
     setAnchor(null);
-    return a;
-  }, [anchor, caret]);
+    anchorRef.current = null;
+    return sel[0];
+  };
 
   // Record a file/folder in the recent list and refresh the welcome view.
   const remember = useCallback((path: string, kind: RecentEntry["kind"]) => {
@@ -712,6 +798,8 @@ function App() {
   const handleSave = useCallback(async () => {
     if (!meta) return;
     setError(null);
+    await flushTypingNow(); // make sure buffered keystrokes are in the buffer...
+    await editChain.current; // ...and all queued edits have applied before saving.
     let target: string | null = meta.path;
     if (!target) {
       const chosen = await saveDialog({});
@@ -723,7 +811,7 @@ function App() {
     } catch (e) {
       setError(String(e));
     }
-  }, [meta]);
+  }, [meta, flushTypingNow]);
 
   // Open a file by path (from the tree or the palette), reusing the tab machinery.
   const openPath = useCallback(
@@ -883,34 +971,37 @@ function App() {
   // just apply the new meta (which refreshes the viewport) and move the caret to
   // where the change landed. A null caret means there was nothing to do.
   const undoRedo = useCallback(
-    async (which: "undo" | "redo") => {
+    async (which: "undo" | "redo"): Promise<void> => {
       if (!meta || readonly) return;
-      try {
+      flushTypingNow();
+      return enqueue(async () => {
         const out = await invoke<EditOutcome>(which);
         setAnchor(null);
+        anchorRef.current = null;
         setMeta(out.meta);
+        charCountRef.current = out.meta.char_count;
         if (out.caret != null) await setCaretFromIdx(out.caret);
         scrollerRef.current?.focus();
-      } catch (e) {
-        setError(String(e));
-      }
+      });
     },
-    [meta, readonly, setCaretFromIdx],
+    [meta, readonly, enqueue, flushTypingNow, setCaretFromIdx],
   );
 
   // Pretty-print the document's JSON (handy for minified blobs, which open without
   // hanging thanks to the viewport's line cap, but are unreadable until reflowed).
-  const formatJson = useCallback(async () => {
+  const formatJson = useCallback(async (): Promise<void> => {
     if (!meta || readonly) return;
-    try {
-      setMeta(await invoke<DocumentMeta>("pretty_print"));
+    flushTypingNow();
+    return enqueue(async () => {
+      const m = await invoke<DocumentMeta>("pretty_print");
+      setMeta(m);
+      charCountRef.current = m.char_count;
       setAnchor(null);
+      anchorRef.current = null;
       await setCaretFromIdx(0);
       scrollerRef.current?.focus();
-    } catch (e) {
-      setError(String(e));
-    }
-  }, [meta, readonly, setCaretFromIdx]);
+    });
+  }, [meta, readonly, enqueue, flushTypingNow, setCaretFromIdx]);
 
   // Live filter-to-view: show only the lines matching a regex (non-destructive).
   // Works on any size, including the read-only mmap engine, so huge logs filter too.
@@ -1018,56 +1109,94 @@ function App() {
 
   // --- Editing. Every op goes through the char-indexed Rust buffer. ---
 
+  // Insert a string (newline, tab, paste, or a selection-replacing character). Flushes
+  // any buffered typing first so it stays ordered, then runs serialized. Uses the caret
+  // returned by `insert_text`, so no second round-trip is needed to place the caret.
   const insertText = useCallback(
-    async (text: string) => {
-      if (!caret) return;
-      try {
-        const at = hasSelection() ? await deleteSelection() : caret.idx;
-        setMeta(await invoke<DocumentMeta>("insert_text", { charIdx: at, text }));
-        await setCaretFromIdx(at + [...text].length);
+    async (text: string): Promise<void> => {
+      if (!caretRef.current) return;
+      flushTypingNow();
+      return enqueue(async () => {
+        if (!caretRef.current) return;
+        const at = selRangeRef() ? await deleteSelectionInline() : caretRef.current.idx;
+        const res = await invoke<EditResult>("insert_text", { charIdx: at, text });
+        setMeta(res.meta);
+        charCountRef.current = res.meta.char_count;
+        const landed = { idx: at + [...text].length, line: res.caret.line, col: res.caret.col };
+        caretRef.current = landed;
+        setCaret(landed);
+        ensureCaretVisible(res.caret.line);
         scheduleRehighlight();
-      } catch (e) {
-        setError(String(e));
-      }
+      });
     },
-    [caret, anchor, deleteSelection, setCaretFromIdx],
+    [enqueue, flushTypingNow, ensureCaretVisible, scheduleRehighlight],
   );
 
-  const backspace = useCallback(async () => {
-    if (!caret) return;
-    try {
-      if (hasSelection()) {
-        await setCaretFromIdx(await deleteSelection());
-        scheduleRehighlight();
+  // Fast path for a plain typed character: advance the caret synchronously (column + 1,
+  // same line) and buffer the character; the buffer is sent as one insert next frame.
+  const typeChar = useCallback(
+    (ch: string) => {
+      const c = caretRef.current;
+      if (!c) return;
+      // Selection active, or a character that changes line/layout: use the full insert.
+      if ((anchorRef.current !== null && anchorRef.current !== c.idx) || ch.includes("\n") || ch === "\t") {
+        void insertText(ch);
         return;
       }
-      if (caret.idx > 0) {
-        setMeta(await invoke<DocumentMeta>("delete_range", { start: caret.idx - 1, end: caret.idx }));
-        await setCaretFromIdx(caret.idx - 1);
-        scheduleRehighlight();
-      }
-    } catch (e) {
-      setError(String(e));
-    }
-  }, [caret, anchor, deleteSelection, setCaretFromIdx]);
+      if (!typeBufRef.current) typeAtRef.current = c.idx;
+      typeBufRef.current += ch;
+      charCountRef.current += 1;
+      const next = { idx: c.idx + 1, line: c.line, col: c.col + 1 };
+      caretRef.current = next;
+      setCaret(next);
+      scheduleFlush();
+    },
+    [insertText, scheduleFlush],
+  );
 
-  const forwardDelete = useCallback(async () => {
-    if (!caret) return;
-    try {
-      if (hasSelection()) {
-        await setCaretFromIdx(await deleteSelection());
-        scheduleRehighlight();
+  const backspace = useCallback(async (): Promise<void> => {
+    if (!caretRef.current) return;
+    flushTypingNow();
+    return enqueue(async () => {
+      const c = caretRef.current;
+      if (!c) return;
+      let landAt: number;
+      if (selRangeRef()) {
+        landAt = await deleteSelectionInline();
+      } else if (c.idx > 0) {
+        const m = await invoke<DocumentMeta>("delete_range", { start: c.idx - 1, end: c.idx });
+        setMeta(m);
+        charCountRef.current = m.char_count;
+        landAt = c.idx - 1;
+      } else {
         return;
       }
-      if (caret.idx < charCount) {
-        setMeta(await invoke<DocumentMeta>("delete_range", { start: caret.idx, end: caret.idx + 1 }));
-        await setCaretFromIdx(caret.idx);
-        scheduleRehighlight();
+      await setCaretFromIdx(landAt);
+      scheduleRehighlight();
+    });
+  }, [enqueue, flushTypingNow, setCaretFromIdx, scheduleRehighlight]);
+
+  const forwardDelete = useCallback(async (): Promise<void> => {
+    if (!caretRef.current) return;
+    flushTypingNow();
+    return enqueue(async () => {
+      const c = caretRef.current;
+      if (!c) return;
+      let landAt: number;
+      if (selRangeRef()) {
+        landAt = await deleteSelectionInline();
+      } else if (c.idx < charCountRef.current) {
+        const m = await invoke<DocumentMeta>("delete_range", { start: c.idx, end: c.idx + 1 });
+        setMeta(m);
+        charCountRef.current = m.char_count;
+        landAt = c.idx;
+      } else {
+        return;
       }
-    } catch (e) {
-      setError(String(e));
-    }
-  }, [caret, anchor, charCount, deleteSelection, setCaretFromIdx]);
+      await setCaretFromIdx(landAt);
+      scheduleRehighlight();
+    });
+  }, [enqueue, flushTypingNow, setCaretFromIdx, scheduleRehighlight]);
 
   // --- Clipboard ---
 
@@ -1082,18 +1211,19 @@ function App() {
     }
   }, [anchor, caret]);
 
-  const cut = useCallback(async () => {
-    const r = selRange();
-    if (!r) return;
-    try {
+  const cut = useCallback(async (): Promise<void> => {
+    if (!selRangeRef()) return;
+    flushTypingNow();
+    return enqueue(async () => {
+      const r = selRangeRef();
+      if (!r) return;
       const text = await invoke<string>("read_range", { start: r[0], end: r[1] });
       await writeText(text);
-      await setCaretFromIdx(await deleteSelection());
+      const landAt = await deleteSelectionInline();
+      await setCaretFromIdx(landAt);
       scheduleRehighlight();
-    } catch (e) {
-      setError(String(e));
-    }
-  }, [anchor, caret, deleteSelection, setCaretFromIdx]);
+    });
+  }, [enqueue, flushTypingNow, setCaretFromIdx, scheduleRehighlight]);
 
   const paste = useCallback(async () => {
     try {
@@ -1106,9 +1236,11 @@ function App() {
 
   const selectAll = useCallback(() => {
     if (!meta) return;
+    flushTypingNow();
     setAnchor(0);
-    void setCaretFromIdx(meta.char_count);
-  }, [meta, setCaretFromIdx]);
+    anchorRef.current = 0;
+    void enqueue(() => setCaretFromIdx(charCountRef.current));
+  }, [meta, enqueue, flushTypingNow, setCaretFromIdx]);
 
   // --- Find / replace (editable files only) ---
 
@@ -1307,31 +1439,48 @@ function App() {
 
   // --- Movement (extend = hold Shift to grow the selection) ---
 
-  const moveCaretTo = useCallback(
-    async (newIdx: number, extend: boolean) => {
-      if (extend) {
-        if (anchor === null && caret) setAnchor(caret.idx);
-      } else {
-        setAnchor(null);
+  // Apply the selection-anchor rule for a caret move, from the synchronous refs.
+  const applyExtend = (extend: boolean) => {
+    if (extend) {
+      if (anchorRef.current === null && caretRef.current) {
+        const a = caretRef.current.idx;
+        setAnchor(a);
+        anchorRef.current = a;
       }
-      await setCaretFromIdx(newIdx);
+    } else {
+      setAnchor(null);
+      anchorRef.current = null;
+    }
+  };
+
+  // Moves flush pending typing and run on the chain, so the caret reflects every queued
+  // edit (and the Rust position lookups see the final document).
+  const moveCaretTo = useCallback(
+    (newIdx: number, extend: boolean): Promise<void> => {
+      flushTypingNow();
+      applyExtend(extend);
+      return enqueue(() => setCaretFromIdx(newIdx));
     },
-    [anchor, caret, setCaretFromIdx],
+    [enqueue, flushTypingNow, setCaretFromIdx],
   );
 
   const moveToLinePos = useCallback(
-    async (line: number, col: number, extend: boolean) => {
-      try {
-        await moveCaretTo(await invoke<number>("pos_to_char", { line, col }), extend);
-      } catch (e) {
-        setError(String(e));
-      }
+    (line: number, col: number, extend: boolean): Promise<void> => {
+      flushTypingNow();
+      applyExtend(extend);
+      return enqueue(async () => {
+        const idx = await invoke<number>("pos_to_char", { line, col });
+        await setCaretFromIdx(idx);
+      });
     },
-    [moveCaretTo],
+    [enqueue, flushTypingNow, setCaretFromIdx],
   );
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
-    if (!caret || !meta) return;
+    // Read the caret from the synchronous ref: within a fast key burst the React state
+    // is a frame behind, and acting on it is exactly what scrambled the text before.
+    const c = caretRef.current;
+    if (!c || !meta) return;
 
     if (e.ctrlKey || e.metaKey) {
       switch (e.key.toLowerCase()) {
@@ -1352,24 +1501,24 @@ function App() {
       case "Tab": e.preventDefault(); void insertText("\t"); return;
       case "ArrowLeft":
         e.preventDefault();
-        if (caret.idx > 0) void moveCaretTo(caret.idx - 1, extend);
+        if (c.idx > 0) void moveCaretTo(c.idx - 1, extend);
         return;
       case "ArrowRight":
         e.preventDefault();
-        if (caret.idx < charCount) void moveCaretTo(caret.idx + 1, extend);
+        if (c.idx < charCountRef.current) void moveCaretTo(c.idx + 1, extend);
         return;
       case "ArrowUp":
         e.preventDefault();
-        if (caret.line > 0) void moveToLinePos(caret.line - 1, caret.col, extend);
+        if (c.line > 0) void moveToLinePos(c.line - 1, c.col, extend);
         return;
       case "ArrowDown":
         e.preventDefault();
-        if (caret.line < lineCount - 1) void moveToLinePos(caret.line + 1, caret.col, extend);
+        if (c.line < lineCount - 1) void moveToLinePos(c.line + 1, c.col, extend);
         return;
-      case "Home": e.preventDefault(); void moveToLinePos(caret.line, 0, extend); return;
-      case "End": e.preventDefault(); void moveToLinePos(caret.line, Number.MAX_SAFE_INTEGER, extend); return;
+      case "Home": e.preventDefault(); void moveToLinePos(c.line, 0, extend); return;
+      case "End": e.preventDefault(); void moveToLinePos(c.line, Number.MAX_SAFE_INTEGER, extend); return;
       default:
-        if (e.key.length === 1) { e.preventDefault(); void insertText(e.key); }
+        if (e.key.length === 1) { e.preventDefault(); typeChar(e.key); }
     }
   };
 

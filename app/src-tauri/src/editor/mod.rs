@@ -887,18 +887,26 @@ pub fn get_viewport(
         .viewport(start, count)
 }
 
+/// Document meta after an insert, plus where the caret lands (the end of the inserted
+/// text). Returning the caret here lets the UI place it in the same round-trip instead
+/// of a second `char_to_pos` call, which halves the IPC on the typing hot path.
+#[derive(Serialize)]
+pub struct EditResult {
+    pub meta: DocumentMeta,
+    pub caret: CaretPos,
+}
+
 #[tauri::command]
 pub fn insert_text(
     char_idx: usize,
     text: String,
     state: State<EditorState>,
-) -> Result<DocumentMeta, EditorError> {
-    state
-        .0
-        .lock()
-        .map_err(|_| EditorError::LockPoisoned)?
-        .active_buffer_mut()?
-        .insert(char_idx, &text)
+) -> Result<EditResult, EditorError> {
+    let mut reg = state.0.lock().map_err(|_| EditorError::LockPoisoned)?;
+    let b = reg.active_buffer_mut()?;
+    let meta = b.insert(char_idx, &text)?;
+    let caret = b.char_to_pos(char_idx + text.chars().count());
+    Ok(EditResult { meta, caret })
 }
 
 #[tauri::command]
