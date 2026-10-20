@@ -1814,7 +1814,14 @@ function App() {
       <aside className="gut gut-l">
         <button
           className={`gut-dot-btn${leftPanel === "files" ? " on" : ""}`}
-          onClick={() => setLeftPanel((v) => (v === "files" ? null : "files"))}
+          onClick={() => {
+            if (leftPanel === "files") setLeftPanel(null);
+            else {
+              closeFind();
+              closeFilter();
+              setLeftPanel("files");
+            }
+          }}
           title="Files"
         >
           <span className="gd" />
@@ -1822,7 +1829,14 @@ function App() {
         </button>
         <button
           className={`gut-dot-btn${findOpen ? " on" : ""}`}
-          onClick={() => (findOpen ? closeFind() : openFind(false))}
+          onClick={() => {
+            if (findOpen) closeFind();
+            else {
+              setLeftPanel(null);
+              closeFilter();
+              openFind(false);
+            }
+          }}
           disabled={!meta || readonly}
           title={`Find (${combo("F")})`}
         >
@@ -1831,7 +1845,14 @@ function App() {
         </button>
         <button
           className={`gut-dot-btn${filterOpen ? " on" : ""}`}
-          onClick={() => (filterOpen ? closeFilter() : openFilter())}
+          onClick={() => {
+            if (filterOpen) closeFilter();
+            else {
+              setLeftPanel(null);
+              closeFind();
+              openFilter();
+            }
+          }}
           disabled={!meta}
           title="Filter lines to view"
         >
@@ -2212,7 +2233,14 @@ function App() {
       <aside className="gut gut-r">
         <button
           className={`gut-dot-btn${leftPanel === "outline" ? " on" : ""}`}
-          onClick={() => setLeftPanel((v) => (v === "outline" ? null : "outline"))}
+          onClick={() => {
+            if (leftPanel === "outline") setLeftPanel(null);
+            else {
+              closeFind();
+              closeFilter();
+              setLeftPanel("outline");
+            }
+          }}
           disabled={!meta}
           title="Outline"
         >
