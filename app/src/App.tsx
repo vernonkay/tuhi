@@ -297,6 +297,14 @@ function IconFile() {
     </svg>
   );
 }
+function IconSettings() {
+  return (
+    <svg {...iconProps}>
+      <circle cx="12" cy="12" r="3" />
+      <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+    </svg>
+  );
+}
 
 function App() {
   const [meta, setMeta] = useState<DocumentMeta | null>(null);
@@ -343,6 +351,7 @@ function App() {
   const [filterMatches, setFilterMatches] = useState<FilterMatch[]>([]);
   const [followOn, setFollowOn] = useState(false);
   const [hlEditorOpen, setHlEditorOpen] = useState(false);
+  const [hlFromSettings, setHlFromSettings] = useState(false); // did the rules editor open from Settings?
   const [highlighters, setHighlighters] = useState<{ pattern: string; color: string }[]>(() => {
     try {
       const raw = localStorage.getItem("tuhi.highlighters");
@@ -358,6 +367,26 @@ function App() {
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [paletteQuery, setPaletteQuery] = useState("");
   const [paletteIndex, setPaletteIndex] = useState(0);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [theme, setTheme] = useState<"auto" | "light" | "dark">(() => {
+    try {
+      const t = localStorage.getItem("tuhi.theme");
+      if (t === "light" || t === "dark" || t === "auto") return t;
+    } catch {
+      /* default below */
+    }
+    return "auto";
+  });
+
+  // Close the highlighter rules editor, returning to Settings if it opened from there
+  // (it's a modal reached from within Settings, not a sibling of the editor).
+  const closeHlEditor = useCallback(() => {
+    setHlEditorOpen(false);
+    if (hlFromSettings) {
+      setHlFromSettings(false);
+      setSettingsOpen(true);
+    }
+  }, [hlFromSettings]);
 
   const refreshOutline = useCallback(async () => {
     try {
@@ -519,6 +548,9 @@ function App() {
   const caretMeasureRef = useRef<HTMLSpanElement>(null);
   const [caretLeft, setCaretLeft] = useState<number | null>(null);
   const hlTimer = useRef<number | null>(null);
+  // The current effective "dark" (resolved from the theme setting), read by the
+  // open/reload calls that tell Rust which syntax theme to use.
+  const darkRef = useRef(false);
 
   // --- Synchronous edit pipeline ---
   // React state updates a frame late, so a fast burst of keystrokes would each read a
@@ -566,6 +598,35 @@ function App() {
     el.textContent = [...text].slice(0, caret.col).join("");
     setCaretLeft(el.getBoundingClientRect().width);
   }, [caret, lines, rangeStart]);
+
+  // Theme: "auto" follows the OS (and tracks it live); "light"/"dark" force it. The
+  // chrome switches via a data-theme attribute (App.css); open docs re-highlight to
+  // the matching syntax theme via `set_theme`, which also drives darkRef for new opens.
+  useEffect(() => {
+    const mq = window.matchMedia("(prefers-color-scheme: dark)");
+    const apply = () => {
+      const dark = theme === "dark" ? true : theme === "light" ? false : mq.matches;
+      darkRef.current = dark;
+      document.documentElement.dataset.theme = dark ? "dark" : "light";
+      try {
+        localStorage.setItem("tuhi.theme", theme);
+      } catch {
+        /* best-effort */
+      }
+      void invoke<DocumentMeta | null>("set_theme", { dark })
+        .then((m) => {
+          if (m) setMeta(m);
+        })
+        .catch(() => {
+          /* nothing open yet */
+        });
+    };
+    apply();
+    if (theme === "auto") {
+      mq.addEventListener("change", apply);
+      return () => mq.removeEventListener("change", apply);
+    }
+  }, [theme]);
 
   const fetchViewport = useCallback(async (start: number, count: number) => {
     try {
@@ -788,7 +849,7 @@ function App() {
     if (!paths.length) return;
     setBusy(true);
     try {
-      const dark = window.matchMedia("(prefers-color-scheme: dark)").matches;
+      const dark = darkRef.current;
       // Open each file as its own tab; the last one ends up active.
       let last: TabsState | null = null;
       for (const p of paths) {
@@ -828,7 +889,7 @@ function App() {
       setError(null);
       setBusy(true);
       try {
-        const dark = window.matchMedia("(prefers-color-scheme: dark)").matches;
+        const dark = darkRef.current;
         await applyTabsState(await invoke<TabsState>("open_document", { path, dark }));
         void revealInTree(path);
         remember(path, "file");
@@ -1081,7 +1142,7 @@ function App() {
   useEffect(() => {
     if (!followOn || !meta?.path) return;
     const path = meta.path;
-    const dark = window.matchMedia("(prefers-color-scheme: dark)").matches;
+    const dark = darkRef.current;
     let cancelled = false;
     const tick = async () => {
       try {
@@ -1349,7 +1410,7 @@ function App() {
         }
         const { files, active } = savedSession;
         if (!files.length) return;
-        const dark = window.matchMedia("(prefers-color-scheme: dark)").matches;
+        const dark = darkRef.current;
         for (const p of files) {
           try {
             await invoke<TabsState>("open_document", { path: p, dark });
@@ -1639,7 +1700,8 @@ function App() {
       ...(meta && !readonly ? [{ label: "Format JSON (pretty-print)", kind: C, run: () => void formatJson() }] : []),
       ...(meta ? [{ label: "Filter lines to view…", kind: C, run: () => openFilter() }] : []),
       ...(meta?.path ? [{ label: followOn ? "Stop following file" : "Follow file (tail)", kind: C, run: () => toggleFollow() }] : []),
-      { label: "Edit highlighters…", kind: C, run: () => setHlEditorOpen(true) },
+      { label: "Edit highlighters…", kind: C, run: () => { setHlFromSettings(false); setHlEditorOpen(true); } },
+      { label: "Settings…", kind: C, run: () => setSettingsOpen(true) },
       { label: "Show files", kind: C, run: () => setLeftPanel((v) => (v === "files" ? null : "files")) },
       ...(meta ? [{ label: "Show outline", kind: C, run: () => setLeftPanel((v) => (v === "outline" ? null : "outline")) }] : []),
       ...tabs.map((t) => ({ label: t.name, kind: "tab" as const, run: () => void switchTab(t.id) })),
@@ -1709,6 +1771,10 @@ function App() {
         </button>
         <button className="rail-btn" onClick={openPalette} title={`Command palette (${combo("P")})`}>
           <IconCommand />
+        </button>
+        <div className="rail-spacer" />
+        <button className="rail-btn" onClick={() => setSettingsOpen(true)} title="Settings">
+          <IconSettings />
         </button>
       </nav>
       <div className="main">
@@ -2050,7 +2116,7 @@ function App() {
           </button>
         )}
         {meta && (
-          <button className="sb-btn" onClick={() => setHlEditorOpen(true)} title="Highlighter rules">
+          <button className="sb-btn" onClick={() => { setHlFromSettings(false); setHlEditorOpen(true); }} title="Highlighter rules">
             Highlighters
           </button>
         )}
@@ -2123,7 +2189,7 @@ function App() {
         </div>
       )}
       {hlEditorOpen && (
-        <div className="palette-overlay" onMouseDown={() => setHlEditorOpen(false)}>
+        <div className="palette-overlay" onMouseDown={() => closeHlEditor()}>
           <div className="palette-modal hl-modal" onMouseDown={(e) => e.stopPropagation()}>
             <div className="hl-head">Highlighter rules</div>
             <div className="hl-body">
@@ -2171,7 +2237,54 @@ function App() {
                 + Add rule
               </button>
               <span className="spacer" />
-              <button className="find-btn" onClick={() => setHlEditorOpen(false)}>
+              <button className="find-btn" onClick={() => closeHlEditor()}>
+                Done
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {settingsOpen && (
+        <div className="palette-overlay" onMouseDown={() => setSettingsOpen(false)}>
+          <div className="palette-modal settings-modal" onMouseDown={(e) => e.stopPropagation()}>
+            <div className="hl-head">Settings</div>
+            <div className="settings-body">
+              <div className="set-group">
+                <div className="set-label">Theme</div>
+                <div className="set-seg">
+                  {(["auto", "light", "dark"] as const).map((t) => (
+                    <button
+                      key={t}
+                      className={`set-opt${theme === t ? " on" : ""}`}
+                      onClick={() => setTheme(t)}
+                    >
+                      {t === "auto" ? "Auto" : t === "light" ? "Light" : "Dark"}
+                    </button>
+                  ))}
+                </div>
+                <div className="set-note">Auto follows your operating system.</div>
+              </div>
+              <div className="set-group">
+                <div className="set-label">Highlighters</div>
+                <button
+                  className="find-btn"
+                  onClick={() => {
+                    setSettingsOpen(false);
+                    setHlFromSettings(true);
+                    setHlEditorOpen(true);
+                  }}
+                >
+                  Manage highlighter rules…
+                </button>
+                <div className="set-note">Pattern → colour rules for logs (ERROR red, WARN amber).</div>
+              </div>
+              <div className="set-note set-more">
+                More settings (font, tab width, wrapping) are on the way.
+              </div>
+            </div>
+            <div className="hl-foot">
+              <span className="spacer" />
+              <button className="find-btn" onClick={() => setSettingsOpen(false)}>
                 Done
               </button>
             </div>
