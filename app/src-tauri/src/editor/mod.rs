@@ -1406,9 +1406,21 @@ mod tests {
         // h0..o4  sp5  w6.._11 4 12 2 13  sp14  f15 o16 o17 .18 b19 a20 r21 (len 22)
         b.insert(0, "hello world_42 foo.bar").unwrap();
         assert_eq!(b.word_boundary(0, true), 5, "end of first word");
-        assert_eq!(b.word_boundary(5, true), 14, "skip space then the whole word_42");
-        assert_eq!(b.word_boundary(22, false), 19, "back to start of trailing word");
-        assert_eq!(b.word_boundary(19, false), 18, "punctuation is its own class");
+        assert_eq!(
+            b.word_boundary(5, true),
+            14,
+            "skip space then the whole word_42"
+        );
+        assert_eq!(
+            b.word_boundary(22, false),
+            19,
+            "back to start of trailing word"
+        );
+        assert_eq!(
+            b.word_boundary(19, false),
+            18,
+            "punctuation is its own class"
+        );
         assert_eq!(b.word_boundary(0, false), 0, "no move before the start");
         assert_eq!(b.word_boundary(22, true), 22, "no move past the end");
     }
