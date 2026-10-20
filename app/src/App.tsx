@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { readText, writeText } from "@tauri-apps/plugin-clipboard-manager";
@@ -34,6 +34,12 @@ interface TabsState {
 interface CaretPos {
   line: number;
   col: number;
+}
+
+/** Mirror of the Rust `EditResult`: doc meta plus the caret after an insert. */
+interface EditResult {
+  meta: DocumentMeta;
+  caret: CaretPos;
 }
 
 /** Mirror of the Rust `EditOutcome`: doc meta after undo/redo + the caret target
@@ -104,6 +110,41 @@ function within(child: string, root: string): boolean {
   return child.startsWith(root + "/") || child.startsWith(root + "\\");
 }
 
+/** The directory to navigate "up" into, or null when `dir` is already a filesystem root.
+ *  Normalises a bare Windows drive ("C:") to its root ("C:\\") so it lists correctly. */
+function parentDir(dir: string): string | null {
+  const p = dirOf(dir);
+  const norm = /^[A-Za-z]:$/.test(p) ? p + "\\" : p;
+  if (p === dir || norm === dir) return null;
+  return norm;
+}
+
+/** A recently opened file or folder, persisted so the welcome view can offer it back. */
+type RecentEntry = { path: string; kind: "folder" | "file" };
+
+const LS_LAST_FOLDER = "tuhi.lastFolder";
+const LS_RECENT = "tuhi.recent";
+
+function loadRecent(): RecentEntry[] {
+  try {
+    const raw = localStorage.getItem(LS_RECENT);
+    if (raw) return JSON.parse(raw) as RecentEntry[];
+  } catch {
+    /* ignore */
+  }
+  return [];
+}
+
+function pushRecent(path: string, kind: RecentEntry["kind"]): void {
+  try {
+    const list = loadRecent().filter((e) => e.path !== path);
+    list.unshift({ path, kind });
+    localStorage.setItem(LS_RECENT, JSON.stringify(list.slice(0, 8)));
+  } catch {
+    /* ignore */
+  }
+}
+
 /** Ancestor directories of `filePath`, from just below `root` down to its parent. */
 function ancestorsWithin(filePath: string, root: string): string[] {
   const out: string[] = [];
@@ -156,7 +197,12 @@ interface Caret extends CaretPos {
 
 const LINE_HEIGHT = 20; // must match `.line` height in App.css
 const OVERSCAN = 12;
-const GUTTER = 76; // `.gutter` width (64) + padding-right (12)
+const GUTTER = 64; // `.gutter` border-box width; its 12px padding-right sits INSIDE it
+// Mirrors the Rust 2 MB highlight cap (HIGHLIGHT_MAX_BYTES), in characters. Above it a
+// file is never highlighted, so re-running the debounced highlight + whole-document
+// outline rebuild after every edit is pure cost: it holds the Rust lock (stalling the
+// next keystroke) and buys nothing. The outline built on open is kept as-is.
+const HIGHLIGHT_MAX_CHARS = 2 * 1024 * 1024;
 
 /** Platform-appropriate shortcut label: "⌘O" on macOS, "Ctrl+O" elsewhere. */
 const IS_MAC =
@@ -294,6 +340,7 @@ function App() {
   });
   const [folderRoot, setFolderRoot] = useState<string | null>(null);
   const [folderPinned, setFolderPinned] = useState(false);
+  const [recent, setRecent] = useState<RecentEntry[]>(() => loadRecent());
   const [dirCache, setDirCache] = useState<Record<string, DirEntry[]>>({});
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [outline, setOutline] = useState<OutlineItem[]>([]);
@@ -429,31 +476,47 @@ function App() {
     [treeWidth],
   );
 
-  // Cold start: always open the tree at the home folder. Deterministic, never a
-  // surprise location. (Opening a file still re-roots the tree to show it in-session,
-  // and Ctrl+O's own dialog separately remembers your last directory.)
+  // Cold start: reopen the folder you last had open (pinned), or show the welcome
+  // state. We deliberately do NOT dump you into your home directory — that first view
+  // was noise, and the only thing it gave you was a tree you had to climb back out of.
   useEffect(() => {
     void (async () => {
-      let root: string | null = null;
-      try {
-        root = await invoke<string | null>("home_dir");
-      } catch {
-        root = null;
-      }
-      if (!root) return;
-      let kids: DirEntry[];
-      try {
-        kids = await invoke<DirEntry[]>("list_dir", { path: root });
-      } catch {
-        return;
-      }
-      const r = root;
-      setFolderRoot((cur) => cur ?? r);
-      setDirCache((prev) => (r in prev ? prev : { ...prev, [r]: kids }));
       setLeftPanel("files");
+      let last: { path: string } | null = null;
+      try {
+        const raw = localStorage.getItem(LS_LAST_FOLDER);
+        if (raw) last = JSON.parse(raw);
+      } catch {
+        /* fall through to the welcome state */
+      }
+      if (!last?.path) return; // first run → welcome view renders
+      try {
+        const kids = await invoke<DirEntry[]>("list_dir", { path: last.path });
+        setFolderRoot((cur) => cur ?? last!.path);
+        setFolderPinned(true);
+        setDirCache((prev) => (last!.path in prev ? prev : { ...prev, [last!.path]: kids }));
+      } catch {
+        // The folder is gone or unreadable: forget it and show the welcome view.
+        try {
+          localStorage.removeItem(LS_LAST_FOLDER);
+        } catch {
+          /* ignore */
+        }
+      }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Remember the last deliberately-opened folder (a pinned root) for next launch.
+  // Transient re-roots from opening a file are not pinned, so they are not persisted.
+  useEffect(() => {
+    if (!folderRoot || !folderPinned) return;
+    try {
+      localStorage.setItem(LS_LAST_FOLDER, JSON.stringify({ path: folderRoot }));
+    } catch {
+      /* best-effort */
+    }
+  }, [folderRoot, folderPinned]);
 
   // Keep the active file scrolled into view in the tree when it or the layout changes.
   useEffect(() => {
@@ -481,21 +544,60 @@ function App() {
   const measureRef = useRef<HTMLSpanElement>(null);
   const findInputRef = useRef<HTMLInputElement>(null);
   const charWidthRef = useRef(7.8);
+  const [, bumpCw] = useState(0); // forces a re-render after the glyph width is re-measured
+  const caretMeasureRef = useRef<HTMLSpanElement>(null);
+  const [caretLeft, setCaretLeft] = useState<number | null>(null);
   const hlTimer = useRef<number | null>(null);
   // The current effective "dark" (resolved from the theme setting), read by the
   // open/reload calls that tell Rust which syntax theme to use.
   const darkRef = useRef(false);
 
+  // --- Synchronous edit pipeline ---
+  // React state updates a frame late, so a fast burst of keystrokes would each read a
+  // stale caret and insert characters at the wrong offset, out of order (the "scramble"
+  // bug). We keep the caret, anchor and char count in refs that update synchronously,
+  // coalesce typed characters into one buffered insert per animation frame, and run
+  // every mutation through a promise chain so edits apply strictly in order and never
+  // overlap in flight.
+  const caretRef = useRef<Caret | null>(null);
+  const anchorRef = useRef<number | null>(null);
+  const charCountRef = useRef(0);
+  const typeBufRef = useRef(""); // characters typed but not yet sent to Rust
+  const typeAtRef = useRef(0); // char index where the buffered run begins
+  const flushRaf = useRef<number | null>(null); // pending requestAnimationFrame handle
+  const editChain = useRef<Promise<void>>(Promise.resolve()); // serialises all edits
+
   const lineCount = meta?.line_count ?? 0;
-  const charCount = meta?.char_count ?? 0;
   const readonly = meta?.readonly ?? false;
 
   useEffect(() => {
-    if (measureRef.current) {
+    const measure = () => {
+      if (!measureRef.current) return;
       const w = measureRef.current.getBoundingClientRect().width / 20;
-      if (w > 0) charWidthRef.current = w;
-    }
+      if (w > 0 && Math.abs(w - charWidthRef.current) > 0.01) {
+        charWidthRef.current = w;
+        bumpCw((n) => n + 1); // reposition the caret with the corrected width
+      }
+    };
+    measure();
+    // Re-measure once fonts settle: the first measure can run before the mono font is
+    // applied, and a stale glyph width drifts the caret a little more each column.
+    document.fonts?.ready?.then(measure).catch(() => {});
   }, []);
+
+  // Position the caret by measuring the ACTUAL rendered prefix of its line, so it lands
+  // exactly on the glyph boundary. `col * glyphWidth` drifts across a line whenever the
+  // assumed width is off by a fraction; measuring the real text cannot drift.
+  useLayoutEffect(() => {
+    const el = caretMeasureRef.current;
+    if (!el || !caret || caret.line < rangeStart || caret.line >= rangeStart + lines.length) {
+      return;
+    }
+    const raw = lines[caret.line - rangeStart]?.text ?? "";
+    const text = raw.replace(/\r?\n$/, "");
+    el.textContent = [...text].slice(0, caret.col).join("");
+    setCaretLeft(el.getBoundingClientRect().width);
+  }, [caret, lines, rangeStart]);
 
   // Theme: "auto" follows the OS (and tracks it live); "light"/"dark" force it. The
   // chrome switches via a data-theme attribute (App.css); open docs re-highlight to
@@ -573,7 +675,9 @@ function App() {
     async (idx: number) => {
       try {
         const pos = await invoke<CaretPos>("char_to_pos", { charIdx: idx });
-        setCaret({ idx, line: pos.line, col: pos.col });
+        const landed = { idx, line: pos.line, col: pos.col };
+        caretRef.current = landed;
+        setCaret(landed);
         ensureCaretVisible(pos.line);
       } catch (e) {
         setError(String(e));
@@ -635,6 +739,10 @@ function App() {
   // Highlighting is off the keystroke path: recompute ~180 ms after typing stops,
   // then refresh the viewport so the new colours show. Keeps typing instant.
   const scheduleRehighlight = useCallback(() => {
+    // Over the highlight cap there is nothing to recolour and the outline rebuild would
+    // scan the whole (huge) document on every pause, stalling typing. Skip it; the
+    // outline from open stays until the file is reopened.
+    if (charCountRef.current > HIGHLIGHT_MAX_CHARS) return;
     if (hlTimer.current != null) clearTimeout(hlTimer.current);
     hlTimer.current = window.setTimeout(() => {
       void (async () => {
@@ -648,21 +756,91 @@ function App() {
     }, 180);
   }, [refreshOutline]);
 
+  // Keep the synchronous refs mirrored to the React state for the call sites that set
+  // caret/anchor outside the edit pipeline (open, switch tab, click, find, undo).
+  useEffect(() => {
+    caretRef.current = caret;
+  }, [caret]);
+  useEffect(() => {
+    anchorRef.current = anchor;
+  }, [anchor]);
+  useEffect(() => {
+    if (meta) charCountRef.current = meta.char_count;
+  }, [meta]);
+
   const hasSelection = () => anchor !== null && caret !== null && anchor !== caret.idx;
   const selRange = (): [number, number] | null => {
     if (!hasSelection() || !caret) return null;
     return [Math.min(anchor!, caret.idx), Math.max(anchor!, caret.idx)];
   };
 
-  // Delete the active selection; return the char index the caret should land on.
-  const deleteSelection = useCallback(async (): Promise<number> => {
-    const r = selRange();
-    if (!r || !caret) return caret?.idx ?? 0;
-    const [a, b] = r;
-    setMeta(await invoke<DocumentMeta>("delete_range", { start: a, end: b }));
+  // Selection range from the synchronous refs (used inside serialized edit ops).
+  const selRangeRef = (): [number, number] | null => {
+    const c = caretRef.current;
+    const a = anchorRef.current;
+    if (!c || a === null || a === c.idx) return null;
+    return [Math.min(a, c.idx), Math.max(a, c.idx)];
+  };
+
+  // Run a mutation serialized after every edit queued before it.
+  const enqueue = useCallback((fn: () => Promise<void>): Promise<void> => {
+    const next = editChain.current.then(fn).catch((e) => setError(String(e)));
+    editChain.current = next;
+    return next;
+  }, []);
+
+  // Send the buffered typed run as a single ordered insert. The optimistic caret is
+  // already correct (plain characters only advance the column), so it is not touched.
+  const flushTyping = useCallback((): Promise<void> => {
+    const text = typeBufRef.current;
+    if (!text) return editChain.current;
+    const at = typeAtRef.current;
+    typeBufRef.current = "";
+    return enqueue(async () => {
+      const res = await invoke<EditResult>("insert_text", { charIdx: at, text });
+      setMeta(res.meta);
+      charCountRef.current = res.meta.char_count;
+      scheduleRehighlight();
+    });
+  }, [enqueue, scheduleRehighlight]);
+
+  // Flush immediately (cancel the pending frame). Non-typing ops call this first so the
+  // buffered characters are queued ahead of them and ordering is preserved.
+  const flushTypingNow = useCallback((): Promise<void> => {
+    if (flushRaf.current != null) {
+      cancelAnimationFrame(flushRaf.current);
+      flushRaf.current = null;
+    }
+    return flushTyping();
+  }, [flushTyping]);
+
+  const scheduleFlush = useCallback(() => {
+    if (flushRaf.current != null) return;
+    flushRaf.current = requestAnimationFrame(() => {
+      flushRaf.current = null;
+      void flushTyping();
+    });
+  }, [flushTyping]);
+
+  // Delete the active selection inside an already-serialized op; returns the char index
+  // the caret should land on, and updates meta/anchor/count. Reads the live refs.
+  const deleteSelectionInline = async (): Promise<number> => {
+    const c = caretRef.current;
+    const sel = selRangeRef();
+    if (!sel || !c) return c?.idx ?? 0;
+    const m = await invoke<DocumentMeta>("delete_range", { start: sel[0], end: sel[1] });
+    setMeta(m);
+    charCountRef.current = m.char_count;
     setAnchor(null);
-    return a;
-  }, [anchor, caret]);
+    anchorRef.current = null;
+    return sel[0];
+  };
+
+  // Record a file/folder in the recent list and refresh the welcome view.
+  const remember = useCallback((path: string, kind: RecentEntry["kind"]) => {
+    pushRecent(path, kind);
+    setRecent(loadRecent());
+  }, []);
 
   const handleOpen = useCallback(async () => {
     setError(null);
@@ -679,16 +857,19 @@ function App() {
       }
       if (last) await applyTabsState(last);
       void revealInTree(paths[paths.length - 1]);
+      paths.forEach((p) => remember(p, "file"));
     } catch (e) {
       setError(String(e));
     } finally {
       setBusy(false);
     }
-  }, [applyTabsState, revealInTree]);
+  }, [applyTabsState, revealInTree, remember]);
 
   const handleSave = useCallback(async () => {
     if (!meta) return;
     setError(null);
+    await flushTypingNow(); // make sure buffered keystrokes are in the buffer...
+    await editChain.current; // ...and all queued edits have applied before saving.
     let target: string | null = meta.path;
     if (!target) {
       const chosen = await saveDialog({});
@@ -700,7 +881,7 @@ function App() {
     } catch (e) {
       setError(String(e));
     }
-  }, [meta]);
+  }, [meta, flushTypingNow]);
 
   // Open a file by path (from the tree or the palette), reusing the tab machinery.
   const openPath = useCallback(
@@ -711,29 +892,58 @@ function App() {
         const dark = darkRef.current;
         await applyTabsState(await invoke<TabsState>("open_document", { path, dark }));
         void revealInTree(path);
+        remember(path, "file");
       } catch (e) {
         setError(String(e));
       } finally {
         setBusy(false);
       }
     },
-    [applyTabsState, revealInTree],
+    [applyTabsState, revealInTree, remember],
+  );
+
+  // Open a folder by path: list it, pin it as the tree root, remember it.
+  const openFolderAt = useCallback(
+    async (path: string) => {
+      try {
+        const kids = await invoke<DirEntry[]>("list_dir", { path });
+        setFolderRoot(path);
+        setFolderPinned(true);
+        setDirCache({ [path]: kids });
+        setExpanded(new Set());
+        setLeftPanel("files");
+        remember(path, "folder");
+      } catch (e) {
+        setError(String(e));
+      }
+    },
+    [remember],
   );
 
   const openFolder = useCallback(async () => {
     const selected = await openDialog({ directory: true, multiple: false });
     if (typeof selected !== "string") return;
+    await openFolderAt(selected);
+  }, [openFolderAt]);
+
+  // Re-root the tree one level up (the ".." row). Pins the new parent so opening a
+  // file from it browses in place rather than re-rooting away, and keeps the folder we
+  // came from expanded so you can see where you were. No-op at a filesystem root.
+  const goUp = useCallback(async () => {
+    if (!folderRoot) return;
+    const parent = parentDir(folderRoot);
+    if (!parent) return;
     try {
-      const kids = await invoke<DirEntry[]>("list_dir", { path: selected });
-      setFolderRoot(selected);
+      const kids = await invoke<DirEntry[]>("list_dir", { path: parent });
+      const prev = folderRoot;
+      setFolderRoot(parent);
       setFolderPinned(true);
-      setDirCache({ [selected]: kids });
-      setExpanded(new Set());
-      setLeftPanel("files");
+      setDirCache((p) => ({ ...p, [parent]: kids }));
+      setExpanded((p) => new Set(p).add(prev));
     } catch (e) {
       setError(String(e));
     }
-  }, []);
+  }, [folderRoot]);
 
   // Expand/collapse a folder, lazily listing its children the first time.
   const toggleDir = useCallback(
@@ -831,34 +1041,37 @@ function App() {
   // just apply the new meta (which refreshes the viewport) and move the caret to
   // where the change landed. A null caret means there was nothing to do.
   const undoRedo = useCallback(
-    async (which: "undo" | "redo") => {
+    async (which: "undo" | "redo"): Promise<void> => {
       if (!meta || readonly) return;
-      try {
+      flushTypingNow();
+      return enqueue(async () => {
         const out = await invoke<EditOutcome>(which);
         setAnchor(null);
+        anchorRef.current = null;
         setMeta(out.meta);
+        charCountRef.current = out.meta.char_count;
         if (out.caret != null) await setCaretFromIdx(out.caret);
         scrollerRef.current?.focus();
-      } catch (e) {
-        setError(String(e));
-      }
+      });
     },
-    [meta, readonly, setCaretFromIdx],
+    [meta, readonly, enqueue, flushTypingNow, setCaretFromIdx],
   );
 
   // Pretty-print the document's JSON (handy for minified blobs, which open without
   // hanging thanks to the viewport's line cap, but are unreadable until reflowed).
-  const formatJson = useCallback(async () => {
+  const formatJson = useCallback(async (): Promise<void> => {
     if (!meta || readonly) return;
-    try {
-      setMeta(await invoke<DocumentMeta>("pretty_print"));
+    flushTypingNow();
+    return enqueue(async () => {
+      const m = await invoke<DocumentMeta>("pretty_print");
+      setMeta(m);
+      charCountRef.current = m.char_count;
       setAnchor(null);
+      anchorRef.current = null;
       await setCaretFromIdx(0);
       scrollerRef.current?.focus();
-    } catch (e) {
-      setError(String(e));
-    }
-  }, [meta, readonly, setCaretFromIdx]);
+    });
+  }, [meta, readonly, enqueue, flushTypingNow, setCaretFromIdx]);
 
   // Live filter-to-view: show only the lines matching a regex (non-destructive).
   // Works on any size, including the read-only mmap engine, so huge logs filter too.
@@ -966,56 +1179,94 @@ function App() {
 
   // --- Editing. Every op goes through the char-indexed Rust buffer. ---
 
+  // Insert a string (newline, tab, paste, or a selection-replacing character). Flushes
+  // any buffered typing first so it stays ordered, then runs serialized. Uses the caret
+  // returned by `insert_text`, so no second round-trip is needed to place the caret.
   const insertText = useCallback(
-    async (text: string) => {
-      if (!caret) return;
-      try {
-        const at = hasSelection() ? await deleteSelection() : caret.idx;
-        setMeta(await invoke<DocumentMeta>("insert_text", { charIdx: at, text }));
-        await setCaretFromIdx(at + [...text].length);
+    async (text: string): Promise<void> => {
+      if (!caretRef.current) return;
+      flushTypingNow();
+      return enqueue(async () => {
+        if (!caretRef.current) return;
+        const at = selRangeRef() ? await deleteSelectionInline() : caretRef.current.idx;
+        const res = await invoke<EditResult>("insert_text", { charIdx: at, text });
+        setMeta(res.meta);
+        charCountRef.current = res.meta.char_count;
+        const landed = { idx: at + [...text].length, line: res.caret.line, col: res.caret.col };
+        caretRef.current = landed;
+        setCaret(landed);
+        ensureCaretVisible(res.caret.line);
         scheduleRehighlight();
-      } catch (e) {
-        setError(String(e));
-      }
+      });
     },
-    [caret, anchor, deleteSelection, setCaretFromIdx],
+    [enqueue, flushTypingNow, ensureCaretVisible, scheduleRehighlight],
   );
 
-  const backspace = useCallback(async () => {
-    if (!caret) return;
-    try {
-      if (hasSelection()) {
-        await setCaretFromIdx(await deleteSelection());
-        scheduleRehighlight();
+  // Fast path for a plain typed character: advance the caret synchronously (column + 1,
+  // same line) and buffer the character; the buffer is sent as one insert next frame.
+  const typeChar = useCallback(
+    (ch: string) => {
+      const c = caretRef.current;
+      if (!c) return;
+      // Selection active, or a character that changes line/layout: use the full insert.
+      if ((anchorRef.current !== null && anchorRef.current !== c.idx) || ch.includes("\n") || ch === "\t") {
+        void insertText(ch);
         return;
       }
-      if (caret.idx > 0) {
-        setMeta(await invoke<DocumentMeta>("delete_range", { start: caret.idx - 1, end: caret.idx }));
-        await setCaretFromIdx(caret.idx - 1);
-        scheduleRehighlight();
-      }
-    } catch (e) {
-      setError(String(e));
-    }
-  }, [caret, anchor, deleteSelection, setCaretFromIdx]);
+      if (!typeBufRef.current) typeAtRef.current = c.idx;
+      typeBufRef.current += ch;
+      charCountRef.current += 1;
+      const next = { idx: c.idx + 1, line: c.line, col: c.col + 1 };
+      caretRef.current = next;
+      setCaret(next);
+      scheduleFlush();
+    },
+    [insertText, scheduleFlush],
+  );
 
-  const forwardDelete = useCallback(async () => {
-    if (!caret) return;
-    try {
-      if (hasSelection()) {
-        await setCaretFromIdx(await deleteSelection());
-        scheduleRehighlight();
+  const backspace = useCallback(async (): Promise<void> => {
+    if (!caretRef.current) return;
+    flushTypingNow();
+    return enqueue(async () => {
+      const c = caretRef.current;
+      if (!c) return;
+      let landAt: number;
+      if (selRangeRef()) {
+        landAt = await deleteSelectionInline();
+      } else if (c.idx > 0) {
+        const m = await invoke<DocumentMeta>("delete_range", { start: c.idx - 1, end: c.idx });
+        setMeta(m);
+        charCountRef.current = m.char_count;
+        landAt = c.idx - 1;
+      } else {
         return;
       }
-      if (caret.idx < charCount) {
-        setMeta(await invoke<DocumentMeta>("delete_range", { start: caret.idx, end: caret.idx + 1 }));
-        await setCaretFromIdx(caret.idx);
-        scheduleRehighlight();
+      await setCaretFromIdx(landAt);
+      scheduleRehighlight();
+    });
+  }, [enqueue, flushTypingNow, setCaretFromIdx, scheduleRehighlight]);
+
+  const forwardDelete = useCallback(async (): Promise<void> => {
+    if (!caretRef.current) return;
+    flushTypingNow();
+    return enqueue(async () => {
+      const c = caretRef.current;
+      if (!c) return;
+      let landAt: number;
+      if (selRangeRef()) {
+        landAt = await deleteSelectionInline();
+      } else if (c.idx < charCountRef.current) {
+        const m = await invoke<DocumentMeta>("delete_range", { start: c.idx, end: c.idx + 1 });
+        setMeta(m);
+        charCountRef.current = m.char_count;
+        landAt = c.idx;
+      } else {
+        return;
       }
-    } catch (e) {
-      setError(String(e));
-    }
-  }, [caret, anchor, charCount, deleteSelection, setCaretFromIdx]);
+      await setCaretFromIdx(landAt);
+      scheduleRehighlight();
+    });
+  }, [enqueue, flushTypingNow, setCaretFromIdx, scheduleRehighlight]);
 
   // --- Clipboard ---
 
@@ -1030,18 +1281,19 @@ function App() {
     }
   }, [anchor, caret]);
 
-  const cut = useCallback(async () => {
-    const r = selRange();
-    if (!r) return;
-    try {
+  const cut = useCallback(async (): Promise<void> => {
+    if (!selRangeRef()) return;
+    flushTypingNow();
+    return enqueue(async () => {
+      const r = selRangeRef();
+      if (!r) return;
       const text = await invoke<string>("read_range", { start: r[0], end: r[1] });
       await writeText(text);
-      await setCaretFromIdx(await deleteSelection());
+      const landAt = await deleteSelectionInline();
+      await setCaretFromIdx(landAt);
       scheduleRehighlight();
-    } catch (e) {
-      setError(String(e));
-    }
-  }, [anchor, caret, deleteSelection, setCaretFromIdx]);
+    });
+  }, [enqueue, flushTypingNow, setCaretFromIdx, scheduleRehighlight]);
 
   const paste = useCallback(async () => {
     try {
@@ -1054,9 +1306,11 @@ function App() {
 
   const selectAll = useCallback(() => {
     if (!meta) return;
+    flushTypingNow();
     setAnchor(0);
-    void setCaretFromIdx(meta.char_count);
-  }, [meta, setCaretFromIdx]);
+    anchorRef.current = 0;
+    void enqueue(() => setCaretFromIdx(charCountRef.current));
+  }, [meta, enqueue, flushTypingNow, setCaretFromIdx]);
 
   // --- Find / replace (editable files only) ---
 
@@ -1151,6 +1405,7 @@ function App() {
         const ts = await invoke<TabsState>("list_tabs");
         if (ts.tabs.length) {
           await applyTabsState(ts);
+          if (ts.meta?.path) void revealInTree(ts.meta.path);
           return;
         }
         const { files, active } = savedSession;
@@ -1163,14 +1418,15 @@ function App() {
             /* skip a file that has moved or been deleted */
           }
         }
-        // Re-select the previously active file if it reopened, then apply. We do NOT
-        // reveal/re-root the tree here, so startup stays on home regardless of which
-        // files were reopened (opening a file later still reveals it).
+        // Re-select the previously active file if it reopened, then apply, and root the
+        // tree at that file's folder so the explorer shows its structure (not the welcome
+        // view). revealInTree respects a pinned folder and otherwise re-roots to the dir.
         const restored = await invoke<TabsState>("list_tabs");
         if (!restored.tabs.length) return;
         const want = restored.tabs.find((t) => t.path && t.path === active);
         const applied = want ? await invoke<TabsState>("switch_tab", { id: want.id }) : restored;
         await applyTabsState(applied);
+        if (applied.meta?.path) void revealInTree(applied.meta.path);
       } catch {
         /* ignore */
       }
@@ -1253,31 +1509,48 @@ function App() {
 
   // --- Movement (extend = hold Shift to grow the selection) ---
 
-  const moveCaretTo = useCallback(
-    async (newIdx: number, extend: boolean) => {
-      if (extend) {
-        if (anchor === null && caret) setAnchor(caret.idx);
-      } else {
-        setAnchor(null);
+  // Apply the selection-anchor rule for a caret move, from the synchronous refs.
+  const applyExtend = (extend: boolean) => {
+    if (extend) {
+      if (anchorRef.current === null && caretRef.current) {
+        const a = caretRef.current.idx;
+        setAnchor(a);
+        anchorRef.current = a;
       }
-      await setCaretFromIdx(newIdx);
+    } else {
+      setAnchor(null);
+      anchorRef.current = null;
+    }
+  };
+
+  // Moves flush pending typing and run on the chain, so the caret reflects every queued
+  // edit (and the Rust position lookups see the final document).
+  const moveCaretTo = useCallback(
+    (newIdx: number, extend: boolean): Promise<void> => {
+      flushTypingNow();
+      applyExtend(extend);
+      return enqueue(() => setCaretFromIdx(newIdx));
     },
-    [anchor, caret, setCaretFromIdx],
+    [enqueue, flushTypingNow, setCaretFromIdx],
   );
 
   const moveToLinePos = useCallback(
-    async (line: number, col: number, extend: boolean) => {
-      try {
-        await moveCaretTo(await invoke<number>("pos_to_char", { line, col }), extend);
-      } catch (e) {
-        setError(String(e));
-      }
+    (line: number, col: number, extend: boolean): Promise<void> => {
+      flushTypingNow();
+      applyExtend(extend);
+      return enqueue(async () => {
+        const idx = await invoke<number>("pos_to_char", { line, col });
+        await setCaretFromIdx(idx);
+      });
     },
-    [moveCaretTo],
+    [enqueue, flushTypingNow, setCaretFromIdx],
   );
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
-    if (!caret || !meta) return;
+    // Read the caret from the synchronous ref: within a fast key burst the React state
+    // is a frame behind, and acting on it is exactly what scrambled the text before.
+    const c = caretRef.current;
+    if (!c || !meta) return;
 
     if (e.ctrlKey || e.metaKey) {
       switch (e.key.toLowerCase()) {
@@ -1298,24 +1571,24 @@ function App() {
       case "Tab": e.preventDefault(); void insertText("\t"); return;
       case "ArrowLeft":
         e.preventDefault();
-        if (caret.idx > 0) void moveCaretTo(caret.idx - 1, extend);
+        if (c.idx > 0) void moveCaretTo(c.idx - 1, extend);
         return;
       case "ArrowRight":
         e.preventDefault();
-        if (caret.idx < charCount) void moveCaretTo(caret.idx + 1, extend);
+        if (c.idx < charCountRef.current) void moveCaretTo(c.idx + 1, extend);
         return;
       case "ArrowUp":
         e.preventDefault();
-        if (caret.line > 0) void moveToLinePos(caret.line - 1, caret.col, extend);
+        if (c.line > 0) void moveToLinePos(c.line - 1, c.col, extend);
         return;
       case "ArrowDown":
         e.preventDefault();
-        if (caret.line < lineCount - 1) void moveToLinePos(caret.line + 1, caret.col, extend);
+        if (c.line < lineCount - 1) void moveToLinePos(c.line + 1, c.col, extend);
         return;
-      case "Home": e.preventDefault(); void moveToLinePos(caret.line, 0, extend); return;
-      case "End": e.preventDefault(); void moveToLinePos(caret.line, Number.MAX_SAFE_INTEGER, extend); return;
+      case "Home": e.preventDefault(); void moveToLinePos(c.line, 0, extend); return;
+      case "End": e.preventDefault(); void moveToLinePos(c.line, Number.MAX_SAFE_INTEGER, extend); return;
       default:
-        if (e.key.length === 1) { e.preventDefault(); void insertText(e.key); }
+        if (e.key.length === 1) { e.preventDefault(); typeChar(e.key); }
     }
   };
 
@@ -1421,6 +1694,7 @@ function App() {
     const items: PaletteItem[] = [
       { label: "Open File…", hint: combo("O"), kind: C, run: () => void handleOpen() },
       { label: "Open Folder…", kind: C, run: () => void openFolder() },
+      ...(folderRoot && parentDir(folderRoot) ? [{ label: "Up to parent folder", kind: C, run: () => void goUp() }] : []),
       ...(meta ? [{ label: "Save", hint: combo("S"), kind: C, run: () => void handleSave() }] : []),
       ...(meta && !readonly ? [{ label: "Find in file…", hint: combo("F"), kind: C, run: () => openFind(false) }] : []),
       ...(meta && !readonly ? [{ label: "Format JSON (pretty-print)", kind: C, run: () => void formatJson() }] : []),
@@ -1558,7 +1832,48 @@ function App() {
                 </button>
               </div>
               <div className="ft-body">
-                {folderRoot ? renderDir(folderRoot, 0) : <p className="ft-empty">Open a folder to browse files.</p>}
+                {folderRoot ? (
+                  <>
+                    {parentDir(folderRoot) && (
+                      <div
+                        className="ft-row ft-up"
+                        onClick={() => void goUp()}
+                        title={`Up to ${parentDir(folderRoot)}`}
+                      >
+                        <span className="ft-caret" />
+                        <span className="ft-name">..</span>
+                      </div>
+                    )}
+                    {renderDir(folderRoot, 0)}
+                  </>
+                ) : (
+                  <div className="ft-welcome">
+                    <p className="ft-welcome-title">No folder open</p>
+                    <div className="ft-welcome-actions">
+                      <button onClick={() => void handleOpen()}>Open File…</button>
+                      <button onClick={() => void openFolder()}>Open Folder…</button>
+                    </div>
+                    {recent.length > 0 && (
+                      <div className="ft-recent">
+                        <p className="ft-recent-head">Recent</p>
+                        {recent.map((e) => (
+                          <div
+                            key={e.path}
+                            className="ft-row ft-recent-row"
+                            title={e.path}
+                            onClick={() =>
+                              void (e.kind === "folder" ? openFolderAt(e.path) : openPath(e.path))
+                            }
+                          >
+                            {e.kind === "folder" ? <IconFolder /> : <IconFile />}
+                            <span className="ft-name">{baseName(e.path)}</span>
+                            <span className="ft-recent-dir">{dirOf(e.path)}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
             </>
           ) : (
@@ -1711,7 +2026,7 @@ function App() {
               {caretVisible && (
                 <div
                   className="caret-cursor"
-                  style={{ top: (caret!.line - rangeStart) * LINE_HEIGHT, left: GUTTER + caret!.col * cw }}
+                  style={{ top: (caret!.line - rangeStart) * LINE_HEIGHT, left: GUTTER + (caretLeft ?? caret!.col * cw) }}
                 />
               )}
             </div>
@@ -1817,6 +2132,7 @@ function App() {
       <span ref={measureRef} className="measure" aria-hidden="true">
         00000000000000000000
       </span>
+      <span ref={caretMeasureRef} className="measure" aria-hidden="true" />
       </div>
       </div>
       </div>
