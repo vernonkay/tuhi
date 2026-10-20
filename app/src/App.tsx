@@ -304,6 +304,7 @@ function App() {
   const [filterMatches, setFilterMatches] = useState<FilterMatch[]>([]);
   const [followOn, setFollowOn] = useState(false);
   const [hlEditorOpen, setHlEditorOpen] = useState(false);
+  const [hlFromSettings, setHlFromSettings] = useState(false); // did the rules editor open from Settings?
   const [highlighters, setHighlighters] = useState<{ pattern: string; color: string }[]>(() => {
     try {
       const raw = localStorage.getItem("tuhi.highlighters");
@@ -329,6 +330,16 @@ function App() {
     }
     return "auto";
   });
+
+  // Close the highlighter rules editor, returning to Settings if it opened from there
+  // (it's a modal reached from within Settings, not a sibling of the editor).
+  const closeHlEditor = useCallback(() => {
+    setHlEditorOpen(false);
+    if (hlFromSettings) {
+      setHlFromSettings(false);
+      setSettingsOpen(true);
+    }
+  }, [hlFromSettings]);
 
   const refreshOutline = useCallback(async () => {
     try {
@@ -1415,7 +1426,7 @@ function App() {
       ...(meta && !readonly ? [{ label: "Format JSON (pretty-print)", kind: C, run: () => void formatJson() }] : []),
       ...(meta ? [{ label: "Filter lines to view…", kind: C, run: () => openFilter() }] : []),
       ...(meta?.path ? [{ label: followOn ? "Stop following file" : "Follow file (tail)", kind: C, run: () => toggleFollow() }] : []),
-      { label: "Edit highlighters…", kind: C, run: () => setHlEditorOpen(true) },
+      { label: "Edit highlighters…", kind: C, run: () => { setHlFromSettings(false); setHlEditorOpen(true); } },
       { label: "Settings…", kind: C, run: () => setSettingsOpen(true) },
       { label: "Show files", kind: C, run: () => setLeftPanel((v) => (v === "files" ? null : "files")) },
       ...(meta ? [{ label: "Show outline", kind: C, run: () => setLeftPanel((v) => (v === "outline" ? null : "outline")) }] : []),
@@ -1790,7 +1801,7 @@ function App() {
           </button>
         )}
         {meta && (
-          <button className="sb-btn" onClick={() => setHlEditorOpen(true)} title="Highlighter rules">
+          <button className="sb-btn" onClick={() => { setHlFromSettings(false); setHlEditorOpen(true); }} title="Highlighter rules">
             Highlighters
           </button>
         )}
@@ -1862,7 +1873,7 @@ function App() {
         </div>
       )}
       {hlEditorOpen && (
-        <div className="palette-overlay" onMouseDown={() => setHlEditorOpen(false)}>
+        <div className="palette-overlay" onMouseDown={() => closeHlEditor()}>
           <div className="palette-modal hl-modal" onMouseDown={(e) => e.stopPropagation()}>
             <div className="hl-head">Highlighter rules</div>
             <div className="hl-body">
@@ -1910,7 +1921,7 @@ function App() {
                 + Add rule
               </button>
               <span className="spacer" />
-              <button className="find-btn" onClick={() => setHlEditorOpen(false)}>
+              <button className="find-btn" onClick={() => closeHlEditor()}>
                 Done
               </button>
             </div>
@@ -1943,6 +1954,7 @@ function App() {
                   className="find-btn"
                   onClick={() => {
                     setSettingsOpen(false);
+                    setHlFromSettings(true);
                     setHlEditorOpen(true);
                   }}
                 >
