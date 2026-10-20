@@ -228,43 +228,6 @@ function IconOpen() {
     </svg>
   );
 }
-function IconSearch() {
-  return (
-    <svg {...iconProps}>
-      <circle cx="11" cy="11" r="7" />
-      <path d="M21 21l-4.3-4.3" />
-    </svg>
-  );
-}
-function IconTree() {
-  return (
-    <svg {...iconProps}>
-      <path d="M3 6a1 1 0 0 1 1-1h5l2 2h9a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1z" />
-    </svg>
-  );
-}
-function IconList() {
-  return (
-    <svg {...iconProps}>
-      <path d="M4 6h16M4 12h16M4 18h10" />
-    </svg>
-  );
-}
-function IconCommand() {
-  return (
-    <svg {...iconProps}>
-      <rect x="4" y="4" width="16" height="16" rx="3" />
-      <path d="M8 9h8M8 13h5" />
-    </svg>
-  );
-}
-function IconFilter() {
-  return (
-    <svg {...iconProps}>
-      <path d="M3 5h18l-7 8v6l-4-2v-4z" />
-    </svg>
-  );
-}
 function IconFolder() {
   return (
     <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden style={{ width: 14, height: 14 }}>
@@ -280,15 +243,6 @@ function IconFile() {
     </svg>
   );
 }
-function IconSettings() {
-  return (
-    <svg {...iconProps}>
-      <circle cx="12" cy="12" r="3" />
-      <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
-    </svg>
-  );
-}
-
 function App() {
   const [meta, setMeta] = useState<DocumentMeta | null>(null);
   const [tabs, setTabs] = useState<TabSummary[]>([]);
@@ -370,20 +324,6 @@ function App() {
       setSettingsOpen(true);
     }
   }, [hlFromSettings]);
-
-  // Esc closes whichever modal is open (the palette and find handle their own Esc on
-  // their focused inputs; the settings and highlighter modals have no such input).
-  useEffect(() => {
-    if (!settingsOpen && !hlEditorOpen) return;
-    const onEsc = (e: KeyboardEvent) => {
-      if (e.key !== "Escape") return;
-      e.preventDefault();
-      if (hlEditorOpen) closeHlEditor();
-      else setSettingsOpen(false);
-    };
-    window.addEventListener("keydown", onEsc);
-    return () => window.removeEventListener("keydown", onEsc);
-  }, [settingsOpen, hlEditorOpen, closeHlEditor]);
 
   const refreshOutline = useCallback(async () => {
     try {
@@ -1430,6 +1370,27 @@ function App() {
     scrollerRef.current?.focus();
   }, []);
 
+  // Esc closes whatever chrome is open, topmost first: a modal, then find/filter, then a
+  // gutter panel. (A second click on the same dot toggles it closed too.) Find and the
+  // palette also handle Esc on their own focused inputs; this covers everything else.
+  useEffect(() => {
+    const anyOpen =
+      settingsOpen || hlEditorOpen || paletteOpen || filterOpen || findOpen || leftPanel !== null;
+    if (!anyOpen) return;
+    const onEsc = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      e.preventDefault();
+      if (settingsOpen) setSettingsOpen(false);
+      else if (hlEditorOpen) closeHlEditor();
+      else if (paletteOpen) setPaletteOpen(false);
+      else if (filterOpen) closeFilter();
+      else if (findOpen) closeFind();
+      else if (leftPanel) setLeftPanel(null);
+    };
+    window.addEventListener("keydown", onEsc);
+    return () => window.removeEventListener("keydown", onEsc);
+  }, [settingsOpen, hlEditorOpen, paletteOpen, filterOpen, findOpen, leftPanel, closeHlEditor, closeFilter, closeFind]);
+
   // Re-run the search as the query or options change while the bar is open.
   useEffect(() => {
     if (findOpen) void runSearch(findQuery);
@@ -1852,36 +1813,40 @@ function App() {
     <div className="shell tg">
       <aside className="gut gut-l">
         <button
-          className={`gut-aff${leftPanel === "files" ? " on" : ""}`}
+          className={`gut-dot-btn${leftPanel === "files" ? " on" : ""}`}
           onClick={() => setLeftPanel((v) => (v === "files" ? null : "files"))}
           title="Files"
         >
-          <IconTree />
+          <span className="gd" />
+          <span className="gd-label">Files</span>
         </button>
-        <span className={`gut-dot${leftPanel === "files" ? " on" : ""}`} />
-        <div className="gut-sp" />
         <button
-          className={`gut-aff${findOpen ? " on" : ""}`}
+          className={`gut-dot-btn${findOpen ? " on" : ""}`}
           onClick={() => (findOpen ? closeFind() : openFind(false))}
           disabled={!meta || readonly}
-          title="Find (Ctrl+F)"
+          title={`Find (${combo("F")})`}
         >
-          <IconSearch />
+          <span className="gd" />
+          <span className="gd-label">Find</span>
         </button>
         <button
-          className={`gut-aff${filterOpen ? " on" : ""}`}
+          className={`gut-dot-btn${filterOpen ? " on" : ""}`}
           onClick={() => (filterOpen ? closeFilter() : openFilter())}
           disabled={!meta}
           title="Filter lines to view"
         >
-          <IconFilter />
+          <span className="gd" />
+          <span className="gd-label">Filter</span>
         </button>
-        <button className="gut-aff" onClick={openPalette} title={`Command palette (${combo("P")})`}>
-          <IconCommand />
+        <button className="gut-dot-btn" onClick={openPalette} title={`Command palette (${combo("P")})`}>
+          <span className="gd" />
+          <span className="gd-label">Commands</span>
         </button>
-        <button className="gut-aff" onClick={() => setSettingsOpen(true)} title="Settings">
-          <IconSettings />
+        <button className="gut-dot-btn" onClick={() => setSettingsOpen(true)} title="Settings">
+          <span className="gd" />
+          <span className="gd-label">Settings</span>
         </button>
+        <div className="gut-sp" />
         <div className="gut-tag">FILES</div>
       </aside>
       <div className="main">
@@ -2246,14 +2211,14 @@ function App() {
       </div>
       <aside className="gut gut-r">
         <button
-          className={`gut-aff${leftPanel === "outline" ? " on" : ""}`}
+          className={`gut-dot-btn${leftPanel === "outline" ? " on" : ""}`}
           onClick={() => setLeftPanel((v) => (v === "outline" ? null : "outline"))}
           disabled={!meta}
           title="Outline"
         >
-          <IconList />
+          <span className="gd" />
+          <span className="gd-label">Outline</span>
         </button>
-        <span className={`gut-dot${leftPanel === "outline" ? " on" : ""}`} />
         <div className="gut-sp" />
         <div className="gut-tag">OUTLINE</div>
       </aside>

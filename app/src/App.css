@@ -657,16 +657,28 @@ html, body, #root {
 }
 .gut-l { border-right: 1px solid var(--border); }
 .gut-r { border-left: 1px solid var(--border); }
-.gut .mark { margin-bottom: 6px; color: var(--ink); }
-.gut-aff {
-  width: 28px; height: 28px; border: none; background: transparent; color: var(--slate);
-  border-radius: 7px; display: grid; place-items: center; cursor: pointer;
+/* Each menu option is a dot; the name floats in on hover (so dots stay discoverable). */
+.gut-dot-btn {
+  position: relative; width: 30px; height: 22px; display: grid; place-items: center;
+  border: none; background: transparent; cursor: pointer; padding: 0;
 }
-.gut-aff:hover:not(:disabled), .gut-aff.on { background: var(--coral-soft); color: var(--coral); }
-.gut-aff:disabled { opacity: 0.4; cursor: default; }
-.gut-aff svg { width: 17px; height: 17px; }
-.gut-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--slate); opacity: 0.4; }
-.gut-dot.on { background: var(--coral); opacity: 1; }
+.gut-dot-btn:disabled { opacity: 0.3; cursor: default; }
+.gd {
+  width: 7px; height: 7px; border-radius: 50%; background: var(--slate); opacity: 0.5;
+  transition: transform 0.12s, background 0.12s, opacity 0.12s;
+}
+.gut-dot-btn:hover:not(:disabled) .gd,
+.gut-dot-btn.on .gd { background: var(--coral); opacity: 1; transform: scale(1.3); }
+.gut-dot-btn:focus-visible { outline: 2px solid var(--coral); outline-offset: 2px; border-radius: 6px; }
+.gd-label {
+  position: absolute; left: 30px; top: 50%; transform: translateY(-50%); white-space: nowrap;
+  background: var(--panel); border: 1px solid var(--border); border-radius: 6px;
+  padding: 2px 9px; font-size: 11px; color: var(--ink);
+  box-shadow: 0 6px 20px -6px rgba(0, 0, 0, 0.4);
+  opacity: 0; pointer-events: none; z-index: 30; transition: opacity 0.1s;
+}
+.gut-dot-btn:hover:not(:disabled) .gd-label { opacity: 1; }
+.gut-r .gd-label { left: auto; right: 30px; }
 .gut-sp { flex: 1; }
 .gut-tag {
   writing-mode: vertical-rl; text-orientation: mixed; font-size: 9px; letter-spacing: 0.16em;
