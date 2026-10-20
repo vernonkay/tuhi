@@ -104,6 +104,15 @@ function within(child: string, root: string): boolean {
   return child.startsWith(root + "/") || child.startsWith(root + "\\");
 }
 
+/** The directory to navigate "up" into, or null when `dir` is already a filesystem root.
+ *  Normalises a bare Windows drive ("C:") to its root ("C:\\") so it lists correctly. */
+function parentDir(dir: string): string | null {
+  const p = dirOf(dir);
+  const norm = /^[A-Za-z]:$/.test(p) ? p + "\\" : p;
+  if (p === dir || norm === dir) return null;
+  return norm;
+}
+
 /** Ancestor directories of `filePath`, from just below `root` down to its parent. */
 function ancestorsWithin(filePath: string, root: string): string[] {
   const out: string[] = [];
@@ -673,6 +682,25 @@ function App() {
       setError(String(e));
     }
   }, []);
+
+  // Re-root the tree one level up (the ".." row). Pins the new parent so opening a
+  // file from it browses in place rather than re-rooting away, and keeps the folder we
+  // came from expanded so you can see where you were. No-op at a filesystem root.
+  const goUp = useCallback(async () => {
+    if (!folderRoot) return;
+    const parent = parentDir(folderRoot);
+    if (!parent) return;
+    try {
+      const kids = await invoke<DirEntry[]>("list_dir", { path: parent });
+      const prev = folderRoot;
+      setFolderRoot(parent);
+      setFolderPinned(true);
+      setDirCache((p) => ({ ...p, [parent]: kids }));
+      setExpanded((p) => new Set(p).add(prev));
+    } catch (e) {
+      setError(String(e));
+    }
+  }, [folderRoot]);
 
   // Expand/collapse a folder, lazily listing its children the first time.
   const toggleDir = useCallback(
@@ -1360,6 +1388,7 @@ function App() {
     const items: PaletteItem[] = [
       { label: "Open File…", hint: combo("O"), kind: C, run: () => void handleOpen() },
       { label: "Open Folder…", kind: C, run: () => void openFolder() },
+      ...(folderRoot && parentDir(folderRoot) ? [{ label: "Up to parent folder", kind: C, run: () => void goUp() }] : []),
       ...(meta ? [{ label: "Save", hint: combo("S"), kind: C, run: () => void handleSave() }] : []),
       ...(meta && !readonly ? [{ label: "Find in file…", hint: combo("F"), kind: C, run: () => openFind(false) }] : []),
       ...(meta && !readonly ? [{ label: "Format JSON (pretty-print)", kind: C, run: () => void formatJson() }] : []),
@@ -1492,7 +1521,23 @@ function App() {
                 </button>
               </div>
               <div className="ft-body">
-                {folderRoot ? renderDir(folderRoot, 0) : <p className="ft-empty">Open a folder to browse files.</p>}
+                {folderRoot ? (
+                  <>
+                    {parentDir(folderRoot) && (
+                      <div
+                        className="ft-row ft-up"
+                        onClick={() => void goUp()}
+                        title={`Up to ${parentDir(folderRoot)}`}
+                      >
+                        <span className="ft-caret" />
+                        <span className="ft-name">..</span>
+                      </div>
+                    )}
+                    {renderDir(folderRoot, 0)}
+                  </>
+                ) : (
+                  <p className="ft-empty">Open a folder to browse files.</p>
+                )}
               </div>
             </>
           ) : (

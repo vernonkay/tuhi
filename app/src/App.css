@@ -147,6 +147,7 @@ html, body, #root {
 .ft-name { overflow: hidden; text-overflow: ellipsis; }
 .ft-caret { display: inline-block; width: 10px; font-size: 9px; color: var(--slate); transition: transform 0.1s; }
 .ft-caret.open { transform: rotate(90deg); }
+.ft-up .ft-name { font-weight: 600; letter-spacing: 1px; }
 
 /* Editor + outline row */
 .workarea { flex: 1; display: flex; min-height: 0; min-width: 0; position: relative; }
