@@ -1596,6 +1596,61 @@ function App() {
     [enqueue, flushTypingNow, setCaretFromIdx],
   );
 
+  // Word-wise caret movement (Ctrl+Arrow, +Shift to extend): ask Rust for the next word
+  // boundary and move there.
+  const moveWord = useCallback(
+    (forward: boolean, extend: boolean): Promise<void> => {
+      flushTypingNow();
+      applyExtend(extend);
+      return enqueue(async () => {
+        const c = caretRef.current;
+        if (!c) return;
+        const idx = await invoke<number>("word_boundary", { charIdx: c.idx, forward });
+        await setCaretFromIdx(idx);
+      });
+    },
+    [enqueue, flushTypingNow, setCaretFromIdx],
+  );
+
+  // Delete the word to one side of the caret (Ctrl+Backspace / Ctrl+Delete). With a
+  // selection active, deletes the selection, as editors do.
+  const deleteWord = useCallback(
+    (forward: boolean): Promise<void> => {
+      flushTypingNow();
+      return enqueue(async () => {
+        const c = caretRef.current;
+        if (!c) return;
+        if (selRangeRef()) {
+          await setCaretFromIdx(await deleteSelectionInline());
+          scheduleRehighlight();
+          return;
+        }
+        const boundary = await invoke<number>("word_boundary", { charIdx: c.idx, forward });
+        if (boundary === c.idx) return;
+        const [lo, hi] = forward ? [c.idx, boundary] : [boundary, c.idx];
+        const m = await invoke<DocumentMeta>("delete_range", { start: lo, end: hi });
+        setMeta(m);
+        charCountRef.current = m.char_count;
+        await setCaretFromIdx(lo);
+        scheduleRehighlight();
+      });
+    },
+    [enqueue, flushTypingNow, setCaretFromIdx, scheduleRehighlight],
+  );
+
+  // Move a viewport-height of lines (PageUp/PageDown, +Shift to extend).
+  const pageMove = useCallback(
+    (down: boolean, extend: boolean): Promise<void> => {
+      const c = caretRef.current;
+      if (!c) return Promise.resolve();
+      const el = scrollerRef.current;
+      const page = el ? Math.max(1, Math.floor(el.clientHeight / LINE_HEIGHT) - 1) : 20;
+      const target = Math.min(Math.max(c.line + (down ? page : -page), 0), Math.max(lineCount - 1, 0));
+      return moveToLinePos(target, c.col, extend);
+    },
+    [moveToLinePos, lineCount],
+  );
+
   const onKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
     // Read the caret from the synchronous ref: within a fast key burst the React state
     // is a frame behind, and acting on it is exactly what scrambled the text before.
@@ -1603,12 +1658,22 @@ function App() {
     if (!c || !meta) return;
 
     if (e.ctrlKey || e.metaKey) {
+      const ex = e.shiftKey;
+      switch (e.key) {
+        case "ArrowLeft": e.preventDefault(); void moveWord(false, ex); return;
+        case "ArrowRight": e.preventDefault(); void moveWord(true, ex); return;
+        case "Home": e.preventDefault(); void moveCaretTo(0, ex); return;
+        case "End": e.preventDefault(); void moveCaretTo(charCountRef.current, ex); return;
+        case "Backspace": e.preventDefault(); void deleteWord(false); return;
+        case "Delete": e.preventDefault(); void deleteWord(true); return;
+        default: break;
+      }
       switch (e.key.toLowerCase()) {
         case "c": e.preventDefault(); void copy(); return;
         case "x": e.preventDefault(); void cut(); return;
         case "v": e.preventDefault(); void paste(); return;
         case "a": e.preventDefault(); selectAll(); return;
-        default: return; // Ctrl+O/S/F/H are handled by the window-level listener
+        default: return; // Ctrl+O/S/F/H/Z/Y/P are handled by the window-level listener
       }
     }
     if (e.altKey) return;
@@ -1637,6 +1702,8 @@ function App() {
         return;
       case "Home": e.preventDefault(); void moveToLinePos(c.line, 0, extend); return;
       case "End": e.preventDefault(); void moveToLinePos(c.line, Number.MAX_SAFE_INTEGER, extend); return;
+      case "PageUp": e.preventDefault(); void pageMove(false, extend); return;
+      case "PageDown": e.preventDefault(); void pageMove(true, extend); return;
       default:
         if (e.key.length === 1) { e.preventDefault(); typeChar(e.key); }
     }
