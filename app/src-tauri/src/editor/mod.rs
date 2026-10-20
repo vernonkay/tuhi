@@ -99,6 +99,17 @@ pub struct FilterMatch {
 /// Addressing is by Unicode character index for now; the move to viewport-local
 /// offsets and a `(line, col)` mapping (so UTF-16 carets from the web-view map
 /// correctly) is tracked separately, as is a line-length cap on `viewport`.
+/// A snapshot handed out by [`Buffer::take_hl_job`] so viewport highlighting can run off
+/// the editor lock: the document (an O(1) rope clone), the file type and theme to parse
+/// with, the epoch it was taken at, and the line count at that moment.
+pub struct HlJob {
+    rope: Rope,
+    ext: String,
+    dark: bool,
+    epoch: u64,
+    line_count: usize,
+}
+
 pub trait Buffer: Send {
     /// Load a file from disk, replacing the current document.
     fn open(&mut self, path: &str) -> Result<DocumentMeta, EditorError>;
@@ -139,6 +150,14 @@ pub trait Buffer: Send {
     /// Switch the highlight theme (dark vs light) and re-highlight in place. No-op
     /// where the engine doesn't highlight (e.g. the large-file mmap buffer).
     fn set_dark(&mut self, _dark: bool) {}
+    /// Take a snapshot for off-lock viewport highlighting, or `None` where the engine
+    /// doesn't highlight on demand (plain, under the whole-doc cap, or the mmap engine).
+    fn take_hl_job(&mut self) -> Option<HlJob> {
+        None
+    }
+    /// Cache spans computed off-lock for the window starting at `start`, unless the
+    /// document changed since the job was taken (epoch mismatch).
+    fn cache_hl_result(&mut self, _epoch: u64, _start: usize, _spans: &[Vec<Span>]) {}
     /// Document outline (markdown headings, or simple code symbols); empty where
     /// the engine doesn't support it.
     fn outline(&self) -> Vec<OutlineItem> {
@@ -295,6 +314,12 @@ pub struct RopeBuffer {
     ext: String,
     highlights: Vec<Vec<Span>>,
     dark: bool,
+    /// Spans computed on demand for the over-cap path (per visible window), by line
+    /// index, so a static viewport isn't re-parsed and `viewport()` can serve colour.
+    hl_cache: std::collections::HashMap<usize, Vec<Span>>,
+    /// Bumped on every mutation / theme change so an off-lock highlight computed against
+    /// a stale document is discarded on store rather than caching wrong colours.
+    hl_epoch: u64,
     /// The file's detected encoding and BOM, remembered so save round-trips them
     /// rather than silently rewriting a non-UTF-8 file as UTF-8.
     encoding: Encoding,
@@ -313,6 +338,8 @@ impl Default for RopeBuffer {
             ext: String::new(),
             highlights: Vec::new(),
             dark: false,
+            hl_cache: std::collections::HashMap::new(),
+            hl_epoch: 0,
             encoding: Encoding::Utf8,
             bom: false,
             undo_stack: Vec::new(),
@@ -338,6 +365,15 @@ impl RopeBuffer {
         if self.undo_stack.len() > MAX_UNDO {
             self.undo_stack.remove(0);
         }
+    }
+
+    /// Invalidate the on-demand highlight cache and bump the epoch, so any off-lock
+    /// highlight in flight is discarded on store rather than caching colours for a stale
+    /// document. Cheap (no parsing). Called from `rehighlight` and from the hot edit
+    /// paths (`insert`/`delete`), which deliberately skip the whole-document rehighlight.
+    fn invalidate_hl_cache(&mut self) {
+        self.hl_epoch = self.hl_epoch.wrapping_add(1);
+        self.hl_cache.clear();
     }
 }
 
@@ -371,7 +407,14 @@ impl Buffer for RopeBuffer {
             .map(|i| {
                 let slice = self.rope.line(i);
                 let chars = slice.len_chars();
-                let spans = self.highlights.get(i).cloned().unwrap_or_default();
+                // Whole-document highlights for under-cap files; the on-demand cache for
+                // over-cap files (empty until `request_highlight` fills the window).
+                let spans = self
+                    .highlights
+                    .get(i)
+                    .cloned()
+                    .or_else(|| self.hl_cache.get(&i).cloned())
+                    .unwrap_or_default();
                 if chars > MAX_VIEWPORT_LINE {
                     ViewportLine {
                         text: slice.slice(0..MAX_VIEWPORT_LINE).to_string(),
@@ -428,6 +471,7 @@ impl Buffer for RopeBuffer {
                 inserted: text.to_string(),
             });
         }
+        self.invalidate_hl_cache();
         Ok(self.make_meta())
     }
 
@@ -447,6 +491,7 @@ impl Buffer for RopeBuffer {
             removed,
             inserted: String::new(),
         });
+        self.invalidate_hl_cache();
         Ok(self.make_meta())
     }
 
@@ -631,11 +676,39 @@ impl Buffer for RopeBuffer {
         } else {
             self.highlights = Vec::new();
         }
+        self.invalidate_hl_cache();
     }
 
     fn set_dark(&mut self, dark: bool) {
         self.dark = dark;
         self.rehighlight();
+    }
+
+    fn take_hl_job(&mut self) -> Option<HlJob> {
+        // Over-cap, known-type files only; under-cap and plain files use `highlights`,
+        // and an empty extension has nothing to detect a syntax from.
+        let over_cap = self.rope.len_bytes() > HIGHLIGHT_MAX_BYTES && !self.ext.is_empty();
+        if !over_cap {
+            return None;
+        }
+        Some(HlJob {
+            rope: self.rope.clone(), // O(1): ropey nodes are Arc-shared
+            ext: self.ext.clone(),
+            dark: self.dark,
+            epoch: self.hl_epoch,
+            line_count: self.rope.len_lines(),
+        })
+    }
+
+    fn cache_hl_result(&mut self, epoch: u64, start: usize, spans: &[Vec<Span>]) {
+        // A mutation during the off-lock parse bumped the epoch, so this result was
+        // computed against a now-stale document: drop it rather than cache wrong colours.
+        if epoch != self.hl_epoch {
+            return;
+        }
+        for (k, s) in spans.iter().enumerate() {
+            self.hl_cache.insert(start + k, s.clone());
+        }
     }
 
     fn outline(&self) -> Vec<OutlineItem> {
@@ -893,6 +966,46 @@ pub fn get_viewport(
         .map_err(|_| EditorError::LockPoisoned)?
         .active_buffer()?
         .viewport(start, count)
+}
+
+/// Compute highlight spans for the window `[start, start + count)` of an over-cap file,
+/// on demand, and cache them so the next `get_viewport` returns colour. Returns the
+/// spans directly too (so the UI can merge without a second fetch), or an empty vec when
+/// the active file isn't viewport-highlighted (plain, under the cap, or read-only mmap).
+///
+/// The parse runs OFF the editor lock (the lock is held only to take the snapshot and to
+/// store the result), so a deep first parse never blocks typing or scrolling, which run
+/// on their own locked commands.
+#[tauri::command]
+pub fn request_highlight(
+    start: usize,
+    count: usize,
+    state: State<EditorState>,
+) -> Result<Vec<Vec<Span>>, EditorError> {
+    let job = {
+        let mut reg = state.0.lock().map_err(|_| EditorError::LockPoisoned)?;
+        match reg.active_buffer_mut()?.take_hl_job() {
+            Some(j) => j,
+            None => return Ok(Vec::new()),
+        }
+    };
+    // Parse off the lock (re-parses from the top of the file, so it can be slow on a very
+    // large file, but never blocks typing/scrolling, which run on their own locked calls).
+    let spans = highlight::highlight_window(
+        &job.ext,
+        job.dark,
+        job.line_count,
+        |i| job.rope.line(i).to_string(),
+        start,
+        count,
+    )
+    .unwrap_or_default();
+    {
+        let mut reg = state.0.lock().map_err(|_| EditorError::LockPoisoned)?;
+        reg.active_buffer_mut()?
+            .cache_hl_result(job.epoch, start, &spans);
+    }
+    Ok(spans)
 }
 
 /// Document meta after an insert, plus where the caret lands (the end of the inserted
@@ -1245,6 +1358,32 @@ mod tests {
                 ".{ext} produced only one colour: {colours:?}"
             );
         }
+    }
+
+    #[test]
+    fn highlight_window_colours_only_the_requested_window_with_correct_state() {
+        // A block comment opened on line 0 must still be seen when we ask only for a
+        // later window: `highlight_window` re-parses from the top so the state carries.
+        let lines: Vec<String> = std::iter::once("/* open comment".to_string())
+            .chain((1..10).map(|i| format!("still comment line {i}")))
+            .chain(std::iter::once("*/ let x = 1;".to_string()))
+            .collect();
+        let line_count = lines.len();
+        let out = highlight::highlight_window(
+            "rs",
+            false,
+            line_count,
+            |i| format!("{}\n", lines[i]),
+            5,
+            3,
+        )
+        .expect("rust syntax exists");
+        assert_eq!(out.len(), 3, "exactly the requested window is returned");
+        // Lines 5..8 are inside the block comment, so each should carry comment colour.
+        assert!(
+            out.iter().all(|line| !line.is_empty()),
+            "lines inside the carried-over block comment should be coloured"
+        );
     }
 
     #[test]

@@ -198,10 +198,11 @@ interface Caret extends CaretPos {
 const LINE_HEIGHT = 20; // must match `.line` height in App.css
 const OVERSCAN = 12;
 const GUTTER = 64; // `.gutter` border-box width; its 12px padding-right sits INSIDE it
-// Mirrors the Rust 2 MB highlight cap (HIGHLIGHT_MAX_BYTES), in characters. Above it a
-// file is never highlighted, so re-running the debounced highlight + whole-document
-// outline rebuild after every edit is pure cost: it holds the Rust lock (stalling the
-// next keystroke) and buys nothing. The outline built on open is kept as-is.
+// Mirrors the Rust 2 MB WHOLE-document highlight cap (HIGHLIGHT_MAX_BYTES), in
+// characters. Above it the document isn't highlighted eagerly, so the debounced
+// whole-document rehighlight + outline rebuild after each edit is skipped (it would hold
+// the Rust lock and stall the next keystroke); the visible window is coloured on demand
+// via `request_highlight` instead, and the outline built on open is kept as-is.
 const HIGHLIGHT_MAX_CHARS = 2 * 1024 * 1024;
 
 /** Platform-appropriate shortcut label: "⌘O" on macOS, "Ctrl+O" elsewhere. */
@@ -580,6 +581,11 @@ function App() {
   const flushRaf = useRef<number | null>(null); // pending requestAnimationFrame handle
   const editChain = useRef<Promise<void>>(Promise.resolve()); // serialises all edits
 
+  // Viewport (on-demand) highlighting for files over the whole-document cap.
+  const rangeStartRef = useRef(0); // latest window start, read by the async highlight merge
+  const hlReqToken = useRef(0); // supersedes stale highlight responses
+  const hlReqTimer = useRef<number | null>(null); // debounce for highlight requests
+
   const lineCount = meta?.line_count ?? 0;
   const readonly = meta?.readonly ?? false;
 
@@ -641,19 +647,50 @@ function App() {
     }
   }, [theme]);
 
-  const fetchViewport = useCallback(async (start: number, count: number) => {
-    try {
-      const [got, base] = await Promise.all([
-        invoke<ViewportLine[]>("get_viewport", { start, count }),
-        invoke<number>("pos_to_char", { line: start, col: 0 }),
-      ]);
-      setLines(got);
-      setRangeStart(start);
-      setWindowBase(base);
-    } catch (e) {
-      setError(String(e));
-    }
+  // Over-cap files aren't highlighted whole-document; ask Rust to colour just this window
+  // (off its lock), then merge the spans in — but only if the window hasn't scrolled away
+  // and a newer request hasn't superseded this one. Debounced so a fast scroll doesn't
+  // fire a parse per frame.
+  const requestViewportHighlight = useCallback((start: number, count: number) => {
+    if (hlReqTimer.current != null) clearTimeout(hlReqTimer.current);
+    const token = ++hlReqToken.current;
+    hlReqTimer.current = window.setTimeout(() => {
+      void (async () => {
+        try {
+          const spans = await invoke<Span[][]>("request_highlight", { start, count });
+          if (!spans.length || token !== hlReqToken.current) return;
+          setLines((prev) => {
+            if (rangeStartRef.current !== start) return prev; // scrolled away
+            return prev.map((ln, k) => (spans[k] ? { ...ln, spans: spans[k] } : ln));
+          });
+        } catch {
+          /* highlighting is best-effort; leave the window plain */
+        }
+      })();
+    }, 60);
   }, []);
+
+  const fetchViewport = useCallback(
+    async (start: number, count: number) => {
+      try {
+        const [got, base] = await Promise.all([
+          invoke<ViewportLine[]>("get_viewport", { start, count }),
+          invoke<number>("pos_to_char", { line: start, col: 0 }),
+        ]);
+        setLines(got);
+        setRangeStart(start);
+        rangeStartRef.current = start;
+        setWindowBase(base);
+        // Large files carry no eager highlights; colour the visible window on demand.
+        if (charCountRef.current > HIGHLIGHT_MAX_CHARS) {
+          requestViewportHighlight(start, got.length);
+        }
+      } catch (e) {
+        setError(String(e));
+      }
+    },
+    [requestViewportHighlight],
+  );
 
   const recomputeViewport = useCallback(() => {
     const el = scrollerRef.current;
