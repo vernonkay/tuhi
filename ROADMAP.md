@@ -34,6 +34,23 @@ it into a lean preferences panel, in the spirit of "every option earns its place
 - Export via Pandoc (PDF / DOCX / HTML).
 - Optional `[[wikilinks]]` (available, never an imposed vault).
 
+## Toward v1.0 — must-haves
+
+The bar for a 1.0 we'd actively market. Large-file credibility first, then the headline
+feature, then hardening and finish. (Target date: TBD.)
+
+1. **Viewport (incremental) highlighting** — colour files above the ~2 MB cap as you
+   scroll, computed off the UI thread, so the large-file-first promise holds visually.
+2. **Engine-backed search / go-to-line / line counts over multi-GB files** — the big-file
+   verbs working at GB scale, not just scrolling.
+3. **Markdown live preview** (the 0.2 headline) — Typora-style hybrid, Mermaid/KaTeX/
+   tables, Pandoc export.
+4. **Crash-safe unsaved buffers + autosave** — never lose work.
+5. **Signed / notarised builds** — remove the SmartScreen/Gatekeeper friction for a public
+   1.0 (0.1.x ships unsigned).
+6. **UI design pass** — tidy the existing design (which is good but has rough edges) to a
+   polished, Obsidian-quality feel.
+
 ## Planned / under consideration
 
 Shaped partly by a study of why Google's Xi-editor was abandoned (see
