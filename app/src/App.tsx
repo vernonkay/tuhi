@@ -211,24 +211,6 @@ const IS_MAC =
 const combo = (key: string) => (IS_MAC ? `⌘${key}` : `Ctrl+${key}`);
 
 /** The caret-over-a-line brand mark (docs/brand.md). Coral caret, ink line. */
-function Mark({ size = 18 }: { size?: number }) {
-  return (
-    <svg
-      className="mark"
-      width={size}
-      height={size}
-      viewBox="0 0 64 64"
-      fill="none"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden="true"
-    >
-      <path d="M14 40 L32 18 L50 40" stroke="var(--coral)" strokeWidth={7} />
-      <path d="M14 52 H50" stroke="currentColor" strokeWidth={6} />
-    </svg>
-  );
-}
-
 const iconProps = {
   viewBox: "0 0 24 24",
   fill: "none",
@@ -388,6 +370,20 @@ function App() {
       setSettingsOpen(true);
     }
   }, [hlFromSettings]);
+
+  // Esc closes whichever modal is open (the palette and find handle their own Esc on
+  // their focused inputs; the settings and highlighter modals have no such input).
+  useEffect(() => {
+    if (!settingsOpen && !hlEditorOpen) return;
+    const onEsc = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      e.preventDefault();
+      if (hlEditorOpen) closeHlEditor();
+      else setSettingsOpen(false);
+    };
+    window.addEventListener("keydown", onEsc);
+    return () => window.removeEventListener("keydown", onEsc);
+  }, [settingsOpen, hlEditorOpen, closeHlEditor]);
 
   const refreshOutline = useCallback(async () => {
     try {
@@ -1855,7 +1851,6 @@ function App() {
   return (
     <div className="shell tg">
       <aside className="gut gut-l">
-        <Mark size={22} />
         <button
           className={`gut-aff${leftPanel === "files" ? " on" : ""}`}
           onClick={() => setLeftPanel((v) => (v === "files" ? null : "files"))}
