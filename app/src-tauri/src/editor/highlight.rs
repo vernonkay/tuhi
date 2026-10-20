@@ -13,13 +13,21 @@ use serde::Serialize;
 use std::str::FromStr;
 use std::sync::OnceLock;
 use syntect::easy::HighlightLines;
-use syntect::highlighting::{Color, ScopeSelectors, StyleModifier, Theme, ThemeItem, ThemeSet};
+use syntect::highlighting::{
+    Color, ScopeSelectors, Style, StyleModifier, Theme, ThemeItem, ThemeSet,
+};
 use syntect::parsing::SyntaxSet;
 use syntect::util::LinesWithEndings;
 
-/// Only highlight documents up to this size; above it we stay plain (and huge
-/// files go to the mmap engine, which never highlights).
+/// Only *whole-document* highlighting runs up to this size (cached eagerly on every
+/// edit). Above it `highlight_window` colours just the visible window on demand, so
+/// large files are no longer plain.
 pub const HIGHLIGHT_MAX_BYTES: usize = 2 * 1024 * 1024;
+
+/// Cap on the characters fed to the parser for one line, mirroring `MAX_VIEWPORT_LINE`
+/// in `mod.rs` so spans line up with the (also capped) viewport text and a multi-MB
+/// minified line can't stall the regex engine. Keep the two in step.
+const MAX_HL_LINE: usize = 10_000;
 
 /// A coloured run within a line, in character columns `[start, end)`.
 #[derive(Serialize, Clone)]
@@ -160,26 +168,88 @@ pub fn highlight_doc(text: &str, ext: &str, dark: bool) -> Option<Vec<Vec<Span>>
     let mut hl = HighlightLines::new(syntax, theme);
     let mut out = Vec::new();
     for line in LinesWithEndings::from(text) {
-        let mut spans = Vec::new();
-        let mut col = 0usize;
         match hl.highlight_line(line, &eng.syntaxes) {
-            Ok(ranges) => {
-                for (style, piece) in ranges {
-                    let len = piece.chars().count();
-                    if len > 0 {
-                        let fg = style.foreground;
-                        spans.push(Span {
-                            start: col,
-                            end: col + len,
-                            color: format!("#{:02x}{:02x}{:02x}", fg.r, fg.g, fg.b),
-                        });
-                        col += len;
-                    }
-                }
-            }
+            Ok(ranges) => out.push(spans_from_ranges(&ranges)),
             Err(_) => return Some(out), // bail to plain on a parser error
         }
-        out.push(spans);
+    }
+    Some(out)
+}
+
+/// Convert one line's syntect highlight ranges into character-column spans. Shared by
+/// the whole-document path above and the viewport highlighter below.
+fn spans_from_ranges(ranges: &[(Style, &str)]) -> Vec<Span> {
+    let mut spans = Vec::new();
+    let mut col = 0usize;
+    for (style, piece) in ranges {
+        let len = piece.chars().count();
+        if len > 0 {
+            let fg = style.foreground;
+            spans.push(Span {
+                start: col,
+                end: col + len,
+                color: format!("#{:02x}{:02x}{:02x}", fg.r, fg.g, fg.b),
+            });
+            col += len;
+        }
+    }
+    spans
+}
+
+/// Cap one line's text to `MAX_HL_LINE` characters before parsing.
+fn cap_line(s: &str) -> String {
+    if s.chars().count() > MAX_HL_LINE {
+        s.chars().take(MAX_HL_LINE).collect()
+    } else {
+        s.to_string()
+    }
+}
+
+/// Per-line highlight spans for the window `[start, start + count)` of a file over the
+/// whole-document cap, computed on demand. syntect's parse state is stateful (a line's
+/// colour depends on everything above it: open block comments, strings), and that state
+/// isn't `Send` with the onig regex engine, so it can't be cached in the editor buffer
+/// between calls. Instead this re-parses from the top of the file each call, discarding
+/// output until the window, which keeps multi-line constructs correct. It is therefore
+/// O(lines-above-the-window) and MUST run off the editor lock; the caller caches the
+/// returned spans so a static viewport isn't re-parsed. (tree-sitter incremental parsing
+/// is the roadmap replacement that makes this cheap.)
+///
+/// Source-agnostic via the `line_text(i)` closure. Returns `None` when no syntax matches,
+/// so the caller leaves the file plain.
+pub fn highlight_window(
+    ext: &str,
+    dark: bool,
+    line_count: usize,
+    mut line_text: impl FnMut(usize) -> String,
+    start: usize,
+    count: usize,
+) -> Option<Vec<Vec<Span>>> {
+    if start >= line_count {
+        return Some(Vec::new());
+    }
+    let eng = engine();
+    let first = line_text(0);
+    let syntax = eng
+        .syntaxes
+        .find_syntax_by_extension(ext)
+        .or_else(|| eng.syntaxes.find_syntax_by_first_line(&first))?;
+    let theme = if dark { &eng.dark } else { &eng.light };
+    let mut hl = HighlightLines::new(syntax, theme);
+
+    let end = (start + count).min(line_count);
+    // Advance parse state through everything above the window, discarding its spans.
+    for i in 0..start {
+        let line = cap_line(&line_text(i));
+        let _ = hl.highlight_line(&line, &eng.syntaxes);
+    }
+    let mut out = Vec::with_capacity(end - start);
+    for i in start..end {
+        let line = cap_line(&line_text(i));
+        match hl.highlight_line(&line, &eng.syntaxes) {
+            Ok(ranges) => out.push(spans_from_ranges(&ranges)),
+            Err(_) => out.push(Vec::new()),
+        }
     }
     Some(out)
 }
