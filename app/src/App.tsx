@@ -113,6 +113,32 @@ function parentDir(dir: string): string | null {
   return norm;
 }
 
+/** A recently opened file or folder, persisted so the welcome view can offer it back. */
+type RecentEntry = { path: string; kind: "folder" | "file" };
+
+const LS_LAST_FOLDER = "tuhi.lastFolder";
+const LS_RECENT = "tuhi.recent";
+
+function loadRecent(): RecentEntry[] {
+  try {
+    const raw = localStorage.getItem(LS_RECENT);
+    if (raw) return JSON.parse(raw) as RecentEntry[];
+  } catch {
+    /* ignore */
+  }
+  return [];
+}
+
+function pushRecent(path: string, kind: RecentEntry["kind"]): void {
+  try {
+    const list = loadRecent().filter((e) => e.path !== path);
+    list.unshift({ path, kind });
+    localStorage.setItem(LS_RECENT, JSON.stringify(list.slice(0, 8)));
+  } catch {
+    /* ignore */
+  }
+}
+
 /** Ancestor directories of `filePath`, from just below `root` down to its parent. */
 function ancestorsWithin(filePath: string, root: string): string[] {
   const out: string[] = [];
@@ -165,7 +191,7 @@ interface Caret extends CaretPos {
 
 const LINE_HEIGHT = 20; // must match `.line` height in App.css
 const OVERSCAN = 12;
-const GUTTER = 76; // `.gutter` width (64) + padding-right (12)
+const GUTTER = 64; // `.gutter` border-box width; its 12px padding-right sits INSIDE it
 
 /** Platform-appropriate shortcut label: "⌘O" on macOS, "Ctrl+O" elsewhere. */
 const IS_MAC =
@@ -295,6 +321,7 @@ function App() {
   });
   const [folderRoot, setFolderRoot] = useState<string | null>(null);
   const [folderPinned, setFolderPinned] = useState(false);
+  const [recent, setRecent] = useState<RecentEntry[]>(() => loadRecent());
   const [dirCache, setDirCache] = useState<Record<string, DirEntry[]>>({});
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [outline, setOutline] = useState<OutlineItem[]>([]);
@@ -409,31 +436,47 @@ function App() {
     [treeWidth],
   );
 
-  // Cold start: always open the tree at the home folder. Deterministic, never a
-  // surprise location. (Opening a file still re-roots the tree to show it in-session,
-  // and Ctrl+O's own dialog separately remembers your last directory.)
+  // Cold start: reopen the folder you last had open (pinned), or show the welcome
+  // state. We deliberately do NOT dump you into your home directory — that first view
+  // was noise, and the only thing it gave you was a tree you had to climb back out of.
   useEffect(() => {
     void (async () => {
-      let root: string | null = null;
-      try {
-        root = await invoke<string | null>("home_dir");
-      } catch {
-        root = null;
-      }
-      if (!root) return;
-      let kids: DirEntry[];
-      try {
-        kids = await invoke<DirEntry[]>("list_dir", { path: root });
-      } catch {
-        return;
-      }
-      const r = root;
-      setFolderRoot((cur) => cur ?? r);
-      setDirCache((prev) => (r in prev ? prev : { ...prev, [r]: kids }));
       setLeftPanel("files");
+      let last: { path: string } | null = null;
+      try {
+        const raw = localStorage.getItem(LS_LAST_FOLDER);
+        if (raw) last = JSON.parse(raw);
+      } catch {
+        /* fall through to the welcome state */
+      }
+      if (!last?.path) return; // first run → welcome view renders
+      try {
+        const kids = await invoke<DirEntry[]>("list_dir", { path: last.path });
+        setFolderRoot((cur) => cur ?? last!.path);
+        setFolderPinned(true);
+        setDirCache((prev) => (last!.path in prev ? prev : { ...prev, [last!.path]: kids }));
+      } catch {
+        // The folder is gone or unreadable: forget it and show the welcome view.
+        try {
+          localStorage.removeItem(LS_LAST_FOLDER);
+        } catch {
+          /* ignore */
+        }
+      }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Remember the last deliberately-opened folder (a pinned root) for next launch.
+  // Transient re-roots from opening a file are not pinned, so they are not persisted.
+  useEffect(() => {
+    if (!folderRoot || !folderPinned) return;
+    try {
+      localStorage.setItem(LS_LAST_FOLDER, JSON.stringify({ path: folderRoot }));
+    } catch {
+      /* best-effort */
+    }
+  }, [folderRoot, folderPinned]);
 
   // Keep the active file scrolled into view in the tree when it or the layout changes.
   useEffect(() => {
@@ -461,6 +504,7 @@ function App() {
   const measureRef = useRef<HTMLSpanElement>(null);
   const findInputRef = useRef<HTMLInputElement>(null);
   const charWidthRef = useRef(7.8);
+  const [, bumpCw] = useState(0); // forces a re-render after the glyph width is re-measured
   const hlTimer = useRef<number | null>(null);
 
   const lineCount = meta?.line_count ?? 0;
@@ -468,10 +512,18 @@ function App() {
   const readonly = meta?.readonly ?? false;
 
   useEffect(() => {
-    if (measureRef.current) {
+    const measure = () => {
+      if (!measureRef.current) return;
       const w = measureRef.current.getBoundingClientRect().width / 20;
-      if (w > 0) charWidthRef.current = w;
-    }
+      if (w > 0 && Math.abs(w - charWidthRef.current) > 0.01) {
+        charWidthRef.current = w;
+        bumpCw((n) => n + 1); // reposition the caret with the corrected width
+      }
+    };
+    measure();
+    // Re-measure once fonts settle: the first measure can run before the mono font is
+    // applied, and a stale glyph width drifts the caret a little more each column.
+    document.fonts?.ready?.then(measure).catch(() => {});
   }, []);
 
   const fetchViewport = useCallback(async (start: number, count: number) => {
@@ -612,6 +664,12 @@ function App() {
     return a;
   }, [anchor, caret]);
 
+  // Record a file/folder in the recent list and refresh the welcome view.
+  const remember = useCallback((path: string, kind: RecentEntry["kind"]) => {
+    pushRecent(path, kind);
+    setRecent(loadRecent());
+  }, []);
+
   const handleOpen = useCallback(async () => {
     setError(null);
     const selected = await openDialog({ multiple: true, directory: false });
@@ -627,12 +685,13 @@ function App() {
       }
       if (last) await applyTabsState(last);
       void revealInTree(paths[paths.length - 1]);
+      paths.forEach((p) => remember(p, "file"));
     } catch (e) {
       setError(String(e));
     } finally {
       setBusy(false);
     }
-  }, [applyTabsState, revealInTree]);
+  }, [applyTabsState, revealInTree, remember]);
 
   const handleSave = useCallback(async () => {
     if (!meta) return;
@@ -659,29 +718,39 @@ function App() {
         const dark = window.matchMedia("(prefers-color-scheme: dark)").matches;
         await applyTabsState(await invoke<TabsState>("open_document", { path, dark }));
         void revealInTree(path);
+        remember(path, "file");
       } catch (e) {
         setError(String(e));
       } finally {
         setBusy(false);
       }
     },
-    [applyTabsState, revealInTree],
+    [applyTabsState, revealInTree, remember],
+  );
+
+  // Open a folder by path: list it, pin it as the tree root, remember it.
+  const openFolderAt = useCallback(
+    async (path: string) => {
+      try {
+        const kids = await invoke<DirEntry[]>("list_dir", { path });
+        setFolderRoot(path);
+        setFolderPinned(true);
+        setDirCache({ [path]: kids });
+        setExpanded(new Set());
+        setLeftPanel("files");
+        remember(path, "folder");
+      } catch (e) {
+        setError(String(e));
+      }
+    },
+    [remember],
   );
 
   const openFolder = useCallback(async () => {
     const selected = await openDialog({ directory: true, multiple: false });
     if (typeof selected !== "string") return;
-    try {
-      const kids = await invoke<DirEntry[]>("list_dir", { path: selected });
-      setFolderRoot(selected);
-      setFolderPinned(true);
-      setDirCache({ [selected]: kids });
-      setExpanded(new Set());
-      setLeftPanel("files");
-    } catch (e) {
-      setError(String(e));
-    }
-  }, []);
+    await openFolderAt(selected);
+  }, [openFolderAt]);
 
   // Re-root the tree one level up (the ".." row). Pins the new parent so opening a
   // file from it browses in place rather than re-rooting away, and keeps the folder we
@@ -1536,7 +1605,32 @@ function App() {
                     {renderDir(folderRoot, 0)}
                   </>
                 ) : (
-                  <p className="ft-empty">Open a folder to browse files.</p>
+                  <div className="ft-welcome">
+                    <p className="ft-welcome-title">No folder open</p>
+                    <div className="ft-welcome-actions">
+                      <button onClick={() => void handleOpen()}>Open File…</button>
+                      <button onClick={() => void openFolder()}>Open Folder…</button>
+                    </div>
+                    {recent.length > 0 && (
+                      <div className="ft-recent">
+                        <p className="ft-recent-head">Recent</p>
+                        {recent.map((e) => (
+                          <div
+                            key={e.path}
+                            className="ft-row ft-recent-row"
+                            title={e.path}
+                            onClick={() =>
+                              void (e.kind === "folder" ? openFolderAt(e.path) : openPath(e.path))
+                            }
+                          >
+                            {e.kind === "folder" ? <IconFolder /> : <IconFile />}
+                            <span className="ft-name">{baseName(e.path)}</span>
+                            <span className="ft-recent-dir">{dirOf(e.path)}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
                 )}
               </div>
             </>

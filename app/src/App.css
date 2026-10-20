@@ -149,6 +149,41 @@ html, body, #root {
 .ft-caret.open { transform: rotate(90deg); }
 .ft-up .ft-name { font-weight: 600; letter-spacing: 1px; }
 
+/* Welcome view: shown in the file pane when no folder is open (first run / cleared). */
+.ft-welcome { padding: 16px 12px; display: flex; flex-direction: column; gap: 16px; }
+.ft-welcome-title { color: var(--slate); font-size: 12px; font-weight: 600; margin: 0; }
+.ft-welcome-actions { display: flex; flex-direction: column; gap: 6px; }
+.ft-welcome-actions button {
+  text-align: left;
+  padding: 6px 10px;
+  border: 1px solid rgba(127, 127, 127, 0.25);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  cursor: pointer;
+}
+.ft-welcome-actions button:hover { background: rgba(127, 127, 127, 0.1); border-color: var(--coral); }
+.ft-recent { display: flex; flex-direction: column; gap: 1px; }
+.ft-recent-head {
+  color: var(--slate);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  margin: 4px 0 2px;
+}
+.ft-recent-row { gap: 6px; }
+.ft-recent-dir {
+  color: var(--slate);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  margin-left: auto;
+  padding-left: 8px;
+  opacity: 0.8;
+}
+
 /* Editor + outline row */
 .workarea { flex: 1; display: flex; min-height: 0; min-width: 0; position: relative; }
 
