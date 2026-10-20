@@ -19,6 +19,7 @@ pub fn run() {
             greet,
             editor::open_document,
             editor::get_viewport,
+            editor::request_highlight,
             editor::insert_text,
             editor::delete_range,
             editor::save_document,
