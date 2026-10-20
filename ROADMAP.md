@@ -50,6 +50,10 @@ feature, then hardening and finish. (Target date: TBD.)
    1.0 (0.1.x ships unsigned).
 6. **UI design pass** — tidy the existing design (which is good but has rough edges) to a
    polished, Obsidian-quality feel.
+7. **Full keyboard command set** — every standard editor shortcut, so a keyboard-first
+   user never reaches for the mouse: word-wise movement and selection
+   (Ctrl/Ctrl+Shift+arrows), document and page jumps (Ctrl+Home/End, PageUp/Down, with
+   Shift to extend), and delete-word (Ctrl+Backspace/Delete).
 
 ## Planned / under consideration
 
