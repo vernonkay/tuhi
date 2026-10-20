@@ -433,13 +433,26 @@ function App() {
         if (within(filePath, folderRoot)) await revealPath(filePath, folderRoot);
         return;
       }
+      // Root one level UP from the file's folder, so the tree shows that folder in
+      // context with its sibling folders rather than a bare file list, then expand the
+      // file's folder so its files are visible. Falls back to the file's own folder at
+      // the top of the tree when it is a filesystem root or the parent can't be listed.
       const dir = dirOf(filePath);
+      const parent = parentDir(dir);
+      const root = parent ?? dir;
       try {
-        const kids = await invoke<DirEntry[]>("list_dir", { path: dir });
-        setFolderRoot(dir);
-        setDirCache((prev) => ({ ...prev, [dir]: kids }));
+        const kids = await invoke<DirEntry[]>("list_dir", { path: root });
+        setFolderRoot(root);
+        setDirCache((prev) => ({ ...prev, [root]: kids }));
+        if (parent) await revealPath(filePath, root);
       } catch {
-        /* leave the tree as-is if the directory can't be listed */
+        try {
+          const kids = await invoke<DirEntry[]>("list_dir", { path: dir });
+          setFolderRoot(dir);
+          setDirCache((prev) => ({ ...prev, [dir]: kids }));
+        } catch {
+          /* leave the tree as-is if the directory can't be listed */
+        }
       }
     },
     [folderPinned, folderRoot, revealPath],
