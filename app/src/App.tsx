@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { readText, writeText } from "@tauri-apps/plugin-clipboard-manager";
@@ -505,6 +505,8 @@ function App() {
   const findInputRef = useRef<HTMLInputElement>(null);
   const charWidthRef = useRef(7.8);
   const [, bumpCw] = useState(0); // forces a re-render after the glyph width is re-measured
+  const caretMeasureRef = useRef<HTMLSpanElement>(null);
+  const [caretLeft, setCaretLeft] = useState<number | null>(null);
   const hlTimer = useRef<number | null>(null);
 
   const lineCount = meta?.line_count ?? 0;
@@ -525,6 +527,20 @@ function App() {
     // applied, and a stale glyph width drifts the caret a little more each column.
     document.fonts?.ready?.then(measure).catch(() => {});
   }, []);
+
+  // Position the caret by measuring the ACTUAL rendered prefix of its line, so it lands
+  // exactly on the glyph boundary. `col * glyphWidth` drifts across a line whenever the
+  // assumed width is off by a fraction; measuring the real text cannot drift.
+  useLayoutEffect(() => {
+    const el = caretMeasureRef.current;
+    if (!el || !caret || caret.line < rangeStart || caret.line >= rangeStart + lines.length) {
+      return;
+    }
+    const raw = lines[caret.line - rangeStart]?.text ?? "";
+    const text = raw.replace(/\r?\n$/, "");
+    el.textContent = [...text].slice(0, caret.col).join("");
+    setCaretLeft(el.getBoundingClientRect().width);
+  }, [caret, lines, rangeStart]);
 
   const fetchViewport = useCallback(async (start: number, count: number) => {
     try {
@@ -1187,6 +1203,7 @@ function App() {
         const ts = await invoke<TabsState>("list_tabs");
         if (ts.tabs.length) {
           await applyTabsState(ts);
+          if (ts.meta?.path) void revealInTree(ts.meta.path);
           return;
         }
         const { files, active } = savedSession;
@@ -1199,14 +1216,15 @@ function App() {
             /* skip a file that has moved or been deleted */
           }
         }
-        // Re-select the previously active file if it reopened, then apply. We do NOT
-        // reveal/re-root the tree here, so startup stays on home regardless of which
-        // files were reopened (opening a file later still reveals it).
+        // Re-select the previously active file if it reopened, then apply, and root the
+        // tree at that file's folder so the explorer shows its structure (not the welcome
+        // view). revealInTree respects a pinned folder and otherwise re-roots to the dir.
         const restored = await invoke<TabsState>("list_tabs");
         if (!restored.tabs.length) return;
         const want = restored.tabs.find((t) => t.path && t.path === active);
         const applied = want ? await invoke<TabsState>("switch_tab", { id: want.id }) : restored;
         await applyTabsState(applied);
+        if (applied.meta?.path) void revealInTree(applied.meta.path);
       } catch {
         /* ignore */
       }
@@ -1784,7 +1802,7 @@ function App() {
               {caretVisible && (
                 <div
                   className="caret-cursor"
-                  style={{ top: (caret!.line - rangeStart) * LINE_HEIGHT, left: GUTTER + caret!.col * cw }}
+                  style={{ top: (caret!.line - rangeStart) * LINE_HEIGHT, left: GUTTER + (caretLeft ?? caret!.col * cw) }}
                 />
               )}
             </div>
@@ -1890,6 +1908,7 @@ function App() {
       <span ref={measureRef} className="measure" aria-hidden="true">
         00000000000000000000
       </span>
+      <span ref={caretMeasureRef} className="measure" aria-hidden="true" />
       </div>
       </div>
       </div>

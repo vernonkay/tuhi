@@ -446,6 +446,7 @@ html, body, #root {
   align-items: center;
   font-family: var(--mono-font);
   font-size: 13px;
+  letter-spacing: 0;       /* must match .measure, or the caret maths drifts per column */
   line-height: 20px;
   white-space: pre;
   position: relative;      /* sit above the selection highlight */
@@ -459,7 +460,7 @@ html, body, #root {
   color: var(--slate);
   user-select: none;
 }
-.text { flex: 1; padding-right: 16px; cursor: text; }
+.text { flex: 1; padding-right: 16px; cursor: text; letter-spacing: 0; }
 .trunc { color: var(--slate); font-style: italic; user-select: none; }
 
 .scroller:focus { outline: none; }
@@ -495,6 +496,7 @@ html, body, #root {
   white-space: pre;
   font-family: var(--mono-font);
   font-size: 13px;
+  letter-spacing: 0;       /* must match .line/.text exactly, or measured width is wrong */
   left: -9999px;
   top: -9999px;
 }
