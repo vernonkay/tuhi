@@ -198,6 +198,11 @@ interface Caret extends CaretPos {
 const LINE_HEIGHT = 20; // must match `.line` height in App.css
 const OVERSCAN = 12;
 const GUTTER = 64; // `.gutter` border-box width; its 12px padding-right sits INSIDE it
+// Mirrors the Rust 2 MB highlight cap (HIGHLIGHT_MAX_BYTES), in characters. Above it a
+// file is never highlighted, so re-running the debounced highlight + whole-document
+// outline rebuild after every edit is pure cost: it holds the Rust lock (stalling the
+// next keystroke) and buys nothing. The outline built on open is kept as-is.
+const HIGHLIGHT_MAX_CHARS = 2 * 1024 * 1024;
 
 /** Platform-appropriate shortcut label: "⌘O" on macOS, "Ctrl+O" elsewhere. */
 const IS_MAC =
@@ -673,6 +678,10 @@ function App() {
   // Highlighting is off the keystroke path: recompute ~180 ms after typing stops,
   // then refresh the viewport so the new colours show. Keeps typing instant.
   const scheduleRehighlight = useCallback(() => {
+    // Over the highlight cap there is nothing to recolour and the outline rebuild would
+    // scan the whole (huge) document on every pause, stalling typing. Skip it; the
+    // outline from open stays until the file is reopened.
+    if (charCountRef.current > HIGHLIGHT_MAX_CHARS) return;
     if (hlTimer.current != null) clearTimeout(hlTimer.current);
     hlTimer.current = window.setTimeout(() => {
       void (async () => {
