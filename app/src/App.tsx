@@ -57,6 +57,13 @@ interface FilterMatch {
   truncated: boolean;
 }
 
+/** A search hit on the large-file engine, addressed by line and character column. */
+interface SearchHit {
+  line: number;
+  col_start: number;
+  col_end: number;
+}
+
 /** A coloured run within a line, in character columns [start, end). */
 interface Span {
   start: number;
@@ -506,11 +513,18 @@ function App() {
   const [useRegex, setUseRegex] = useState(false);
   const [caseSensitive, setCaseSensitive] = useState(false);
   const [matches, setMatches] = useState<Array<[number, number]>>([]);
+  // Large-file (read-only) find: matches as line/column, navigated by scrolling.
+  const [roHits, setRoHits] = useState<SearchHit[]>([]);
+  const [searchTrunc, setSearchTrunc] = useState(false);
   const [activeMatch, setActiveMatch] = useState(0);
+  // Go-to-line prompt.
+  const [gotoOpen, setGotoOpen] = useState(false);
+  const [gotoValue, setGotoValue] = useState("");
 
   const scrollerRef = useRef<HTMLDivElement>(null);
   const measureRef = useRef<HTMLSpanElement>(null);
   const findInputRef = useRef<HTMLInputElement>(null);
+  const gotoInputRef = useRef<HTMLInputElement>(null);
   const charWidthRef = useRef(7.8);
   const [, bumpCw] = useState(0); // forces a re-render after the glyph width is re-measured
   const caretMeasureRef = useRef<HTMLSpanElement>(null);
@@ -674,6 +688,30 @@ function App() {
     if (top < el.scrollTop) el.scrollTop = top;
     else if (bottom > el.scrollTop + el.clientHeight) el.scrollTop = bottom - el.clientHeight;
   }, []);
+
+  // Scroll a line roughly into the middle of the viewport. Used for go-to-line and
+  // large-file find navigation, where there is no caret to drive the view. The
+  // onScroll handler refetches the window, so no explicit viewport call is needed.
+  const scrollToLine = useCallback((line: number) => {
+    const el = scrollerRef.current;
+    if (!el) return;
+    el.scrollTop = Math.max(0, line * LINE_HEIGHT - el.clientHeight / 2);
+  }, []);
+
+  const closeGoto = useCallback(() => {
+    setGotoOpen(false);
+    scrollerRef.current?.focus();
+  }, []);
+
+  // Parse the 1-based line number, clamp to the document, and scroll there.
+  const submitGoto = useCallback(() => {
+    const n = parseInt(gotoValue, 10);
+    if (!Number.isNaN(n) && meta && meta.line_count > 0) {
+      const clamped = Math.min(Math.max(n, 1), meta.line_count);
+      scrollToLine(clamped - 1);
+    }
+    closeGoto();
+  }, [gotoValue, meta, scrollToLine, closeGoto]);
 
   const setCaretFromIdx = useCallback(
     async (idx: number) => {
@@ -1320,16 +1358,34 @@ function App() {
 
   const runSearch = useCallback(
     async (q: string) => {
-      if (!meta || readonly || !q) {
+      if (!meta || !q) {
         setMatches([]);
+        setRoHits([]);
+        setSearchTrunc(false);
         return;
       }
       try {
+        if (readonly) {
+          // Large-file engine: positional (line/column) matches, scrolled into view.
+          const page = await invoke<{ hits: SearchHit[]; truncated: boolean }>("search_positions", {
+            query: q,
+            useRegex,
+            caseSensitive,
+          });
+          setMatches([]);
+          setRoHits(page.hits);
+          setSearchTrunc(page.truncated);
+          setActiveMatch(0);
+          if (page.hits.length) scrollToLine(page.hits[0].line);
+          return;
+        }
         const ms = await invoke<Array<[number, number]>>("search", {
           query: q,
           useRegex,
           caseSensitive,
         });
+        setRoHits([]);
+        setSearchTrunc(false);
         setMatches(ms);
         setActiveMatch(0);
         if (ms.length) {
@@ -1339,20 +1395,29 @@ function App() {
       } catch (e) {
         setError(String(e));
         setMatches([]);
+        setRoHits([]);
+        setSearchTrunc(false);
       }
     },
-    [meta, readonly, useRegex, caseSensitive, setCaretFromIdx],
+    [meta, readonly, useRegex, caseSensitive, setCaretFromIdx, scrollToLine],
   );
 
   const gotoMatch = useCallback(
     async (k: number) => {
+      if (readonly) {
+        if (!roHits.length) return;
+        const i = ((k % roHits.length) + roHits.length) % roHits.length;
+        setActiveMatch(i);
+        scrollToLine(roHits[i].line);
+        return;
+      }
       if (!matches.length) return;
       const i = ((k % matches.length) + matches.length) % matches.length;
       setActiveMatch(i);
       setAnchor(matches[i][0]);
       await setCaretFromIdx(matches[i][1]);
     },
-    [matches, setCaretFromIdx],
+    [readonly, roHits, matches, setCaretFromIdx, scrollToLine],
   );
 
   const doReplaceAll = useCallback(async () => {
@@ -1374,9 +1439,11 @@ function App() {
 
   const openFind = useCallback(
     (replace: boolean) => {
-      if (!meta || readonly) return;
+      if (!meta) return;
+      // Replace needs an editable buffer; find alone works on the large-file engine.
+      if (replace && readonly) return;
       setFindOpen(true);
-      setShowReplace(replace);
+      setShowReplace(replace && !readonly);
       setTimeout(() => findInputRef.current?.focus(), 0);
     },
     [meta, readonly],
@@ -1385,6 +1452,8 @@ function App() {
   const closeFind = useCallback(() => {
     setFindOpen(false);
     setMatches([]);
+    setRoHits([]);
+    setSearchTrunc(false);
     scrollerRef.current?.focus();
   }, []);
 
@@ -1393,7 +1462,7 @@ function App() {
   // palette also handle Esc on their own focused inputs; this covers everything else.
   useEffect(() => {
     const anyOpen =
-      settingsOpen || hlEditorOpen || paletteOpen || filterOpen || findOpen || leftPanel !== null;
+      settingsOpen || hlEditorOpen || paletteOpen || filterOpen || findOpen || gotoOpen || leftPanel !== null;
     if (!anyOpen) return;
     const onEsc = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
@@ -1402,12 +1471,13 @@ function App() {
       else if (hlEditorOpen) closeHlEditor();
       else if (paletteOpen) setPaletteOpen(false);
       else if (filterOpen) closeFilter();
+      else if (gotoOpen) closeGoto();
       else if (findOpen) closeFind();
       else if (leftPanel) setLeftPanel(null);
     };
     window.addEventListener("keydown", onEsc);
     return () => window.removeEventListener("keydown", onEsc);
-  }, [settingsOpen, hlEditorOpen, paletteOpen, filterOpen, findOpen, leftPanel, closeHlEditor, closeFilter, closeFind]);
+  }, [settingsOpen, hlEditorOpen, paletteOpen, filterOpen, findOpen, gotoOpen, leftPanel, closeHlEditor, closeFilter, closeFind, closeGoto]);
 
   // Re-run the search as the query or options change while the bar is open.
   useEffect(() => {
@@ -1495,9 +1565,17 @@ function App() {
           }
           break;
         case "f":
-          if (meta && !readonly) {
+          if (meta) {
             e.preventDefault();
             openFind(false);
+          }
+          break;
+        case "g":
+          if (meta) {
+            e.preventDefault();
+            setGotoValue("");
+            setGotoOpen(true);
+            setTimeout(() => gotoInputRef.current?.focus(), 0);
           }
           break;
         case "h":
@@ -1749,6 +1827,21 @@ function App() {
       }
     }
   }
+  // Large-file find: hits are already line/column, so draw those in the window directly.
+  if (findOpen && readonly && roHits.length && lines.length) {
+    const winEnd = rangeStart + lines.length;
+    for (const h of roHits) {
+      if (h.line < rangeStart || h.line >= winEnd) continue;
+      const textLen = [...lines[h.line - rangeStart].text.replace(/\r?\n$/, "")].length;
+      const c1 = Math.min(h.col_start, textLen);
+      const c2 = Math.min(h.col_end, textLen);
+      findRects.push({
+        line: h.line,
+        left: GUTTER + c1 * cw,
+        width: Math.max((c2 - c1) * cw, 2),
+      });
+    }
+  }
 
   // ---- render-time helpers for the Studio panels ----
   const baseName = (p: string) => p.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || p;
@@ -1788,7 +1881,8 @@ function App() {
       { label: "Open Folder…", kind: C, run: () => void openFolder() },
       ...(folderRoot && parentDir(folderRoot) ? [{ label: "Up to parent folder", kind: C, run: () => void goUp() }] : []),
       ...(meta ? [{ label: "Save", hint: combo("S"), kind: C, run: () => void handleSave() }] : []),
-      ...(meta && !readonly ? [{ label: "Find in file…", hint: combo("F"), kind: C, run: () => openFind(false) }] : []),
+      ...(meta ? [{ label: "Find in file…", hint: combo("F"), kind: C, run: () => openFind(false) }] : []),
+      ...(meta ? [{ label: "Go to line…", hint: combo("G"), kind: C, run: () => { setGotoValue(""); setGotoOpen(true); setTimeout(() => gotoInputRef.current?.focus(), 0); } }] : []),
       ...(meta && !readonly ? [{ label: "Format JSON (pretty-print)", kind: C, run: () => void formatJson() }] : []),
       ...(meta ? [{ label: "Filter lines to view…", kind: C, run: () => openFilter() }] : []),
       ...(meta?.path ? [{ label: followOn ? "Stop following file" : "Follow file (tail)", kind: C, run: () => toggleFollow() }] : []),
@@ -1858,7 +1952,7 @@ function App() {
               openFind(false);
             }
           }}
-          disabled={!meta || readonly}
+          disabled={!meta}
           title={`Find (${combo("F")})`}
         >
           <span className="gd" />
@@ -2065,6 +2159,32 @@ function App() {
 
       {error && <div className="error">{error}</div>}
 
+      {gotoOpen && (
+        <div className="findbar">
+          <div className="find-row">
+            <input
+              ref={gotoInputRef}
+              className="find-input"
+              placeholder={`Go to line (1–${lineCount.toLocaleString()})`}
+              value={gotoValue}
+              inputMode="numeric"
+              onChange={(e) => setGotoValue(e.target.value.replace(/[^0-9]/g, ""))}
+              onKeyDown={(e) => {
+                if (e.key === "Escape") {
+                  e.preventDefault();
+                  closeGoto();
+                } else if (e.key === "Enter") {
+                  e.preventDefault();
+                  submitGoto();
+                }
+              }}
+            />
+            <button className="find-btn" onClick={submitGoto} title="Go (Enter)">↵</button>
+            <button className="find-btn" onClick={closeGoto} title="Close (Esc)">✕</button>
+          </div>
+        </div>
+      )}
+
       {findOpen && (
         <div className="findbar">
           <div className="find-row">
@@ -2085,13 +2205,18 @@ function App() {
               }}
             />
             <span className="find-count">
-              {matches.length ? `${activeMatch + 1} / ${matches.length}` : "0 results"}
+              {(() => {
+                const n = readonly ? roHits.length : matches.length;
+                return n ? `${activeMatch + 1} / ${n}${readonly && searchTrunc ? "+" : ""}` : "0 results";
+              })()}
             </span>
             <button className="find-btn" onClick={() => void gotoMatch(activeMatch - 1)} title="Previous (Shift+Enter)">↑</button>
             <button className="find-btn" onClick={() => void gotoMatch(activeMatch + 1)} title="Next (Enter)">↓</button>
             <button className={`find-toggle${caseSensitive ? " on" : ""}`} onClick={() => setCaseSensitive((v) => !v)} title="Match case">Aa</button>
             <button className={`find-toggle${useRegex ? " on" : ""}`} onClick={() => setUseRegex((v) => !v)} title="Regular expression">.*</button>
-            <button className={`find-toggle${showReplace ? " on" : ""}`} onClick={() => setShowReplace((v) => !v)} title="Toggle replace">⇄</button>
+            {!readonly && (
+              <button className={`find-toggle${showReplace ? " on" : ""}`} onClick={() => setShowReplace((v) => !v)} title="Toggle replace">⇄</button>
+            )}
             <button className="find-btn" onClick={closeFind} title="Close (Esc)">✕</button>
           </div>
           {showReplace && (
