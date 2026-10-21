@@ -1061,14 +1061,16 @@ pub fn get_viewport(
 /// spans directly too (so the UI can merge without a second fetch), or an empty vec when
 /// the active file isn't viewport-highlighted (plain, under the cap, or read-only mmap).
 ///
-/// The parse runs OFF the editor lock (the lock is held only to take the snapshot and to
-/// store the result), so a deep first parse never blocks typing or scrolling, which run
-/// on their own locked commands.
+/// The command is `async` and the parse runs on a blocking worker thread, so a deep parse
+/// (it re-parses from the top of the file, slow on a large file) never blocks the UI
+/// thread — without which the whole window freezes ("not responding") while a 15 MB file's
+/// window is coloured. The editor lock is held only to take the snapshot and store the
+/// result, never across the parse.
 #[tauri::command]
-pub fn request_highlight(
+pub async fn request_highlight(
     start: usize,
     count: usize,
-    state: State<EditorState>,
+    state: State<'_, EditorState>,
 ) -> Result<Vec<Vec<Span>>, EditorError> {
     let job = {
         let mut reg = state.0.lock().map_err(|_| EditorError::LockPoisoned)?;
@@ -1077,21 +1079,27 @@ pub fn request_highlight(
             None => return Ok(Vec::new()),
         }
     };
-    // Parse off the lock (re-parses from the top of the file, so it can be slow on a very
-    // large file, but never blocks typing/scrolling, which run on their own locked calls).
-    let spans = highlight::highlight_window(
-        &job.ext,
-        job.dark,
-        job.line_count,
-        |i| job.rope.line(i).to_string(),
-        start,
-        count,
-    )
-    .unwrap_or_default();
+    let epoch = job.epoch;
+    // Parse on a blocking thread: CPU-bound, and on a large file multi-second, so it must
+    // stay off the main thread or the WebView stops pumping messages and the OS reports the
+    // window as not responding.
+    let spans = tauri::async_runtime::spawn_blocking(move || {
+        highlight::highlight_window(
+            &job.ext,
+            job.dark,
+            job.line_count,
+            |i| job.rope.line(i).to_string(),
+            start,
+            count,
+        )
+        .unwrap_or_default()
+    })
+    .await
+    .map_err(|e| EditorError::Other(format!("highlight task failed: {e}")))?;
     {
         let mut reg = state.0.lock().map_err(|_| EditorError::LockPoisoned)?;
         reg.active_buffer_mut()?
-            .cache_hl_result(job.epoch, start, &spans);
+            .cache_hl_result(epoch, start, &spans);
     }
     Ok(spans)
 }
