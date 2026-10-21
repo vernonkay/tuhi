@@ -1,0 +1,525 @@
+//! Markdown block model for the live (hybrid) preview (feature 3, phase 1).
+//!
+//! Parses the document into a flat list of blocks, each carrying the SOURCE LINE
+//! SPAN it came from (`[start_line, end_line)`, zero-based). The line span is the
+//! key to the hybrid editor: it lets the frontend render every block rich except
+//! the one the caret sits in, which it swaps back to raw Markdown for editing.
+//!
+//! Text-bearing blocks (headings, paragraphs, list items, quotes) carry their
+//! inline runs (bold / italic / code / strikethrough / link) already resolved, so
+//! the frontend renders formatting without a second parser on the UI thread. Blocks
+//! whose rich rendering comes in a later phase (code fences, tables, raw HTML) carry
+//! their raw source slice in `raw` instead.
+
+use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
+use serde::Serialize;
+
+/// A styled run of inline text within a block.
+#[derive(Serialize, Clone, Debug, PartialEq, Default)]
+pub struct InlineRun {
+    pub text: String,
+    pub bold: bool,
+    pub italic: bool,
+    pub code: bool,
+    pub strike: bool,
+    /// Link target when this run is (part of) a link, else `None`.
+    pub href: Option<String>,
+}
+
+/// What a block is. Serialized with an internal `kind` tag plus its fields.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum BlockKind {
+    Heading {
+        level: u8,
+    },
+    Paragraph,
+    ListItem {
+        ordered: bool,
+        number: u64,
+        depth: u8,
+        /// `Some(true/false)` for a task-list checkbox, else `None`.
+        checked: Option<bool>,
+    },
+    Quote,
+    /// A fenced or indented code block; `lang` is the info string (may be empty).
+    Code {
+        lang: String,
+    },
+    Table,
+    Rule,
+    Html,
+}
+
+/// One rendered block plus the source lines it spans.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+pub struct Block {
+    #[serde(flatten)]
+    pub kind: BlockKind,
+    /// First source line (zero-based, inclusive).
+    pub start_line: usize,
+    /// One past the last source line (zero-based, exclusive).
+    pub end_line: usize,
+    /// Inline runs for text-bearing blocks; empty for code / table / rule / html.
+    pub inlines: Vec<InlineRun>,
+    /// Raw source for blocks not yet rendered rich (code / table / html); else empty.
+    pub raw: String,
+}
+
+/// The text block currently being assembled (heading / paragraph / list item / quote).
+struct Pending {
+    kind: BlockKind,
+    start_byte: usize,
+    end_byte: usize,
+    inlines: Vec<InlineRun>,
+}
+
+/// Parse `text` into blocks with resolved line spans. A document with no content
+/// yields an empty list.
+pub fn parse_blocks(text: &str) -> Vec<Block> {
+    let line_starts = line_starts(text);
+    let line_of = |byte: usize| -> usize {
+        line_starts
+            .partition_point(|&s| s <= byte)
+            .saturating_sub(1)
+    };
+    let to_block = |p: Pending| -> Block {
+        Block {
+            kind: p.kind,
+            start_line: line_of(p.start_byte),
+            end_line: line_of(p.end_byte.saturating_sub(1)) + 1,
+            inlines: p.inlines,
+            raw: String::new(),
+        }
+    };
+
+    let mut opts = Options::empty();
+    opts.insert(Options::ENABLE_TABLES);
+    opts.insert(Options::ENABLE_STRIKETHROUGH);
+    opts.insert(Options::ENABLE_TASKLISTS);
+
+    let mut blocks: Vec<Block> = Vec::new();
+    let mut pending: Option<Pending> = None;
+
+    // Inline style depth (nesting-safe) and the active link target.
+    let mut bold = 0usize;
+    let mut italic = 0usize;
+    let mut strike = 0usize;
+    let mut href: Option<String> = None;
+
+    // List nesting: each entry is the next item number (ordered) or None (bullet).
+    let mut list_stack: Vec<Option<u64>> = Vec::new();
+    let mut quote_depth = 0usize;
+
+    // Code block accumulation.
+    let mut code_lang: Option<String> = None;
+    let mut code_start = 0usize;
+    let mut code_text = String::new();
+    // Table / html raw accumulation.
+    let mut raw_kind: Option<BlockKind> = None;
+    let mut raw_start = 0usize;
+
+    let push_run = |inlines: &mut Vec<InlineRun>,
+                    s: &str,
+                    bold,
+                    italic,
+                    code,
+                    strike,
+                    href: &Option<String>| {
+        if s.is_empty() {
+            return;
+        }
+        inlines.push(InlineRun {
+            text: s.to_string(),
+            bold,
+            italic,
+            code,
+            strike,
+            href: href.clone(),
+        });
+    };
+
+    for (ev, range) in Parser::new_ext(text, opts).into_offset_iter() {
+        match ev {
+            Event::Start(Tag::Heading { level, .. }) => {
+                pending = Some(Pending {
+                    kind: BlockKind::Heading {
+                        level: heading_level(level),
+                    },
+                    start_byte: range.start,
+                    end_byte: range.end,
+                    inlines: Vec::new(),
+                });
+            }
+            // A paragraph inside a list item or quote is folded into that block (its
+            // pending block is already open); only a bare paragraph starts its own.
+            Event::Start(Tag::Paragraph) if pending.is_none() => {
+                let kind = if quote_depth > 0 {
+                    BlockKind::Quote
+                } else {
+                    BlockKind::Paragraph
+                };
+                pending = Some(Pending {
+                    kind,
+                    start_byte: range.start,
+                    end_byte: range.end,
+                    inlines: Vec::new(),
+                });
+            }
+            Event::Start(Tag::List(first)) => {
+                // A nested list ends its parent item's own text block first, so the
+                // parent item is not overwritten by the nested item below.
+                if let Some(p) = pending.take() {
+                    blocks.push(to_block(p));
+                }
+                list_stack.push(first);
+            }
+            Event::Start(Tag::Item) => {
+                if let Some(p) = pending.take() {
+                    blocks.push(to_block(p));
+                }
+                let ordered = matches!(list_stack.last(), Some(Some(_)));
+                let number = match list_stack.last_mut() {
+                    Some(Some(n)) => {
+                        let cur = *n;
+                        *n += 1;
+                        cur
+                    }
+                    _ => 0,
+                };
+                let depth = (list_stack.len().saturating_sub(1)).min(u8::MAX as usize) as u8;
+                pending = Some(Pending {
+                    kind: BlockKind::ListItem {
+                        ordered,
+                        number,
+                        depth,
+                        checked: None,
+                    },
+                    start_byte: range.start,
+                    end_byte: range.end,
+                    inlines: Vec::new(),
+                });
+            }
+            Event::TaskListMarker(done) => {
+                if let Some(Pending {
+                    kind: BlockKind::ListItem { checked, .. },
+                    ..
+                }) = pending.as_mut()
+                {
+                    *checked = Some(done);
+                }
+            }
+            Event::Start(Tag::BlockQuote(_)) => quote_depth += 1,
+            Event::End(TagEnd::BlockQuote(_)) => quote_depth = quote_depth.saturating_sub(1),
+            Event::Start(Tag::Emphasis) => italic += 1,
+            Event::End(TagEnd::Emphasis) => italic = italic.saturating_sub(1),
+            Event::Start(Tag::Strong) => bold += 1,
+            Event::End(TagEnd::Strong) => bold = bold.saturating_sub(1),
+            Event::Start(Tag::Strikethrough) => strike += 1,
+            Event::End(TagEnd::Strikethrough) => strike = strike.saturating_sub(1),
+            Event::Start(Tag::Link { dest_url, .. }) => href = Some(dest_url.to_string()),
+            Event::End(TagEnd::Link) => href = None,
+            Event::Start(Tag::CodeBlock(kind)) => {
+                code_lang = Some(match kind {
+                    CodeBlockKind::Fenced(info) => info.to_string(),
+                    CodeBlockKind::Indented => String::new(),
+                });
+                code_start = range.start;
+                code_text.clear();
+            }
+            Event::End(TagEnd::CodeBlock) => {
+                if let Some(lang) = code_lang.take() {
+                    blocks.push(Block {
+                        kind: BlockKind::Code { lang },
+                        start_line: line_of(code_start),
+                        end_line: line_of(range.end.saturating_sub(1)) + 1,
+                        inlines: Vec::new(),
+                        raw: code_text.clone(),
+                    });
+                }
+            }
+            Event::Start(Tag::Table(_)) => {
+                raw_kind = Some(BlockKind::Table);
+                raw_start = range.start;
+            }
+            Event::End(TagEnd::Table) => {
+                if let Some(kind) = raw_kind.take() {
+                    blocks.push(Block {
+                        kind,
+                        start_line: line_of(raw_start),
+                        end_line: line_of(range.end.saturating_sub(1)) + 1,
+                        inlines: Vec::new(),
+                        raw: text[raw_start..range.end].to_string(),
+                    });
+                }
+            }
+            Event::Rule => {
+                blocks.push(Block {
+                    kind: BlockKind::Rule,
+                    start_line: line_of(range.start),
+                    end_line: line_of(range.end.saturating_sub(1)) + 1,
+                    inlines: Vec::new(),
+                    raw: String::new(),
+                });
+            }
+            Event::Text(t) => {
+                if code_lang.is_some() {
+                    code_text.push_str(&t);
+                } else if let Some(p) = pending.as_mut() {
+                    p.end_byte = range.end;
+                    push_run(
+                        &mut p.inlines,
+                        &t,
+                        bold > 0,
+                        italic > 0,
+                        false,
+                        strike > 0,
+                        &href,
+                    );
+                }
+            }
+            Event::Code(t) => {
+                if let Some(p) = pending.as_mut() {
+                    p.end_byte = range.end;
+                    push_run(
+                        &mut p.inlines,
+                        &t,
+                        bold > 0,
+                        italic > 0,
+                        true,
+                        strike > 0,
+                        &href,
+                    );
+                }
+            }
+            Event::SoftBreak | Event::HardBreak => {
+                if let Some(p) = pending.as_mut() {
+                    p.end_byte = range.end;
+                    push_run(
+                        &mut p.inlines,
+                        " ",
+                        bold > 0,
+                        italic > 0,
+                        false,
+                        strike > 0,
+                        &href,
+                    );
+                }
+            }
+            // A block-level HTML run becomes its own block; inline HTML inside a
+            // paragraph is left to that paragraph (dropped for now).
+            Event::Html(_) | Event::InlineHtml(_) if pending.is_none() && code_lang.is_none() => {
+                blocks.push(Block {
+                    kind: BlockKind::Html,
+                    start_line: line_of(range.start),
+                    end_line: line_of(range.end.saturating_sub(1)) + 1,
+                    inlines: Vec::new(),
+                    raw: text[range.start..range.end].to_string(),
+                });
+            }
+            Event::End(end @ (TagEnd::Heading(_) | TagEnd::Paragraph | TagEnd::Item)) => {
+                // A paragraph-end inside an item or quote keeps the block open (the
+                // item/quote end finalizes it); take-or-restore avoids a nested if.
+                let is_para = matches!(end, TagEnd::Paragraph);
+                match pending.take() {
+                    Some(p)
+                        if !is_para
+                            || matches!(p.kind, BlockKind::Paragraph | BlockKind::Quote) =>
+                    {
+                        blocks.push(to_block(p));
+                    }
+                    other => pending = other,
+                }
+            }
+            Event::End(TagEnd::List(_)) => {
+                list_stack.pop();
+            }
+            _ => {}
+        }
+    }
+
+    blocks
+}
+
+/// Byte offset of the start of each line (always starts with 0).
+fn line_starts(text: &str) -> Vec<usize> {
+    let mut v = vec![0usize];
+    for (i, b) in text.bytes().enumerate() {
+        if b == b'\n' {
+            v.push(i + 1);
+        }
+    }
+    v
+}
+
+fn heading_level(l: HeadingLevel) -> u8 {
+    match l {
+        HeadingLevel::H1 => 1,
+        HeadingLevel::H2 => 2,
+        HeadingLevel::H3 => 3,
+        HeadingLevel::H4 => 4,
+        HeadingLevel::H5 => 5,
+        HeadingLevel::H6 => 6,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn kinds(blocks: &[Block]) -> Vec<&BlockKind> {
+        blocks.iter().map(|b| &b.kind).collect()
+    }
+
+    #[test]
+    fn heading_and_paragraph_with_line_spans() {
+        let md = "# Title\n\nA paragraph.\n";
+        let b = parse_blocks(md);
+        assert_eq!(b.len(), 2);
+        assert_eq!(b[0].kind, BlockKind::Heading { level: 1 });
+        assert_eq!((b[0].start_line, b[0].end_line), (0, 1));
+        assert_eq!(
+            b[0].inlines,
+            vec![InlineRun {
+                text: "Title".into(),
+                ..Default::default()
+            }]
+        );
+        assert_eq!(b[1].kind, BlockKind::Paragraph);
+        assert_eq!((b[1].start_line, b[1].end_line), (2, 3));
+    }
+
+    #[test]
+    fn inline_bold_italic_code_link_resolve() {
+        let md = "Some **bold** and *it* and `x` and [t](http://e).";
+        let b = parse_blocks(md);
+        assert_eq!(b.len(), 1);
+        let runs = &b[0].inlines;
+        assert!(runs.iter().any(|r| r.text == "bold" && r.bold));
+        assert!(runs.iter().any(|r| r.text == "it" && r.italic));
+        assert!(runs.iter().any(|r| r.text == "x" && r.code));
+        assert!(
+            runs.iter()
+                .any(|r| r.text == "t" && r.href.as_deref() == Some("http://e"))
+        );
+    }
+
+    #[test]
+    fn bullet_and_ordered_list_items_carry_depth_and_number() {
+        let md = "- one\n- two\n\n1. first\n2. second\n";
+        let b = parse_blocks(md);
+        assert_eq!(
+            kinds(&b),
+            vec![
+                &BlockKind::ListItem {
+                    ordered: false,
+                    number: 0,
+                    depth: 0,
+                    checked: None
+                },
+                &BlockKind::ListItem {
+                    ordered: false,
+                    number: 0,
+                    depth: 0,
+                    checked: None
+                },
+                &BlockKind::ListItem {
+                    ordered: true,
+                    number: 1,
+                    depth: 0,
+                    checked: None
+                },
+                &BlockKind::ListItem {
+                    ordered: true,
+                    number: 2,
+                    depth: 0,
+                    checked: None
+                },
+            ]
+        );
+        assert_eq!(
+            b[0].inlines,
+            vec![InlineRun {
+                text: "one".into(),
+                ..Default::default()
+            }]
+        );
+        // First list item is on source line 0; the ordered list starts on line 3.
+        assert_eq!(b[0].start_line, 0);
+        assert_eq!(b[2].start_line, 3);
+    }
+
+    #[test]
+    fn nested_list_increments_depth() {
+        let md = "- top\n  - child\n";
+        let b = parse_blocks(md);
+        assert_eq!(b.len(), 2);
+        assert!(matches!(b[0].kind, BlockKind::ListItem { depth: 0, .. }));
+        assert!(matches!(b[1].kind, BlockKind::ListItem { depth: 1, .. }));
+    }
+
+    #[test]
+    fn code_fence_keeps_language_and_body_raw() {
+        let md = "```rust\nfn main() {}\n```\n";
+        let b = parse_blocks(md);
+        assert_eq!(b.len(), 1);
+        assert_eq!(
+            b[0].kind,
+            BlockKind::Code {
+                lang: "rust".into()
+            }
+        );
+        assert_eq!(b[0].raw, "fn main() {}\n");
+        assert_eq!((b[0].start_line, b[0].end_line), (0, 3));
+    }
+
+    #[test]
+    fn quote_and_rule() {
+        let md = "> quoted\n\n---\n";
+        let b = parse_blocks(md);
+        assert_eq!(b[0].kind, BlockKind::Quote);
+        assert_eq!(
+            b[0].inlines,
+            vec![InlineRun {
+                text: "quoted".into(),
+                ..Default::default()
+            }]
+        );
+        assert_eq!(b[1].kind, BlockKind::Rule);
+    }
+
+    #[test]
+    fn table_carries_raw_source() {
+        let md = "| a | b |\n|---|---|\n| 1 | 2 |\n";
+        let b = parse_blocks(md);
+        assert_eq!(b.len(), 1);
+        assert_eq!(b[0].kind, BlockKind::Table);
+        assert!(b[0].raw.contains("| a | b |"));
+        assert_eq!(b[0].start_line, 0);
+    }
+
+    #[test]
+    fn task_list_marker_sets_checked() {
+        let md = "- [x] done\n- [ ] todo\n";
+        let b = parse_blocks(md);
+        assert!(matches!(
+            b[0].kind,
+            BlockKind::ListItem {
+                checked: Some(true),
+                ..
+            }
+        ));
+        assert!(matches!(
+            b[1].kind,
+            BlockKind::ListItem {
+                checked: Some(false),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn empty_document_yields_no_blocks() {
+        assert!(parse_blocks("").is_empty());
+    }
+}
