@@ -86,11 +86,33 @@ pub struct OutlineItem {
 /// Cap on filter results, so even a huge log returns a bounded payload.
 const MAX_FILTER_MATCHES: usize = 1000;
 
+/// Cap on positional search hits returned in one page, so find over a multi-GB file
+/// returns a bounded payload (the UI shows "N+" and navigates within the page).
+const MAX_SEARCH_MATCHES: usize = 5000;
+
 /// One matching line from a live filter: its 0-based line index and (capped) text.
 #[derive(Serialize)]
 pub struct FilterMatch {
     pub line: usize,
     pub text: String,
+    pub truncated: bool,
+}
+
+/// One search hit addressed by line and character column, for finding over the
+/// large-file (read-only) engine, which has no global character index. `col_start`
+/// and `col_end` are character offsets within the line `[col_start, col_end)`.
+#[derive(Serialize)]
+pub struct SearchHit {
+    pub line: usize,
+    pub col_start: usize,
+    pub col_end: usize,
+}
+
+/// A bounded page of search hits. `truncated` is true when the match count hit
+/// [`MAX_SEARCH_MATCHES`] and further matches exist beyond those returned.
+#[derive(Serialize)]
+pub struct SearchPage {
+    pub hits: Vec<SearchHit>,
     pub truncated: bool,
 }
 
@@ -194,6 +216,21 @@ pub trait Buffer: Send {
         _case_sensitive: bool,
     ) -> Result<Vec<FilterMatch>, EditorError> {
         Ok(Vec::new())
+    }
+    /// Find all matches as line/column positions, for the large-file (read-only)
+    /// engine which has no global character index to return from [`Buffer::search`].
+    /// Capped at [`MAX_SEARCH_MATCHES`]. Default: no matches (engines that return
+    /// char ranges from `search` don't need this).
+    fn search_positions(
+        &self,
+        _query: &str,
+        _use_regex: bool,
+        _case_sensitive: bool,
+    ) -> Result<SearchPage, EditorError> {
+        Ok(SearchPage {
+            hits: Vec::new(),
+            truncated: false,
+        })
     }
 }
 
@@ -1024,14 +1061,16 @@ pub fn get_viewport(
 /// spans directly too (so the UI can merge without a second fetch), or an empty vec when
 /// the active file isn't viewport-highlighted (plain, under the cap, or read-only mmap).
 ///
-/// The parse runs OFF the editor lock (the lock is held only to take the snapshot and to
-/// store the result), so a deep first parse never blocks typing or scrolling, which run
-/// on their own locked commands.
+/// The command is `async` and the parse runs on a blocking worker thread, so a deep parse
+/// (it re-parses from the top of the file, slow on a large file) never blocks the UI
+/// thread — without which the whole window freezes ("not responding") while a 15 MB file's
+/// window is coloured. The editor lock is held only to take the snapshot and store the
+/// result, never across the parse.
 #[tauri::command]
-pub fn request_highlight(
+pub async fn request_highlight(
     start: usize,
     count: usize,
-    state: State<EditorState>,
+    state: State<'_, EditorState>,
 ) -> Result<Vec<Vec<Span>>, EditorError> {
     let job = {
         let mut reg = state.0.lock().map_err(|_| EditorError::LockPoisoned)?;
@@ -1040,21 +1079,27 @@ pub fn request_highlight(
             None => return Ok(Vec::new()),
         }
     };
-    // Parse off the lock (re-parses from the top of the file, so it can be slow on a very
-    // large file, but never blocks typing/scrolling, which run on their own locked calls).
-    let spans = highlight::highlight_window(
-        &job.ext,
-        job.dark,
-        job.line_count,
-        |i| job.rope.line(i).to_string(),
-        start,
-        count,
-    )
-    .unwrap_or_default();
+    let epoch = job.epoch;
+    // Parse on a blocking thread: CPU-bound, and on a large file multi-second, so it must
+    // stay off the main thread or the WebView stops pumping messages and the OS reports the
+    // window as not responding.
+    let spans = tauri::async_runtime::spawn_blocking(move || {
+        highlight::highlight_window(
+            &job.ext,
+            job.dark,
+            job.line_count,
+            |i| job.rope.line(i).to_string(),
+            start,
+            count,
+        )
+        .unwrap_or_default()
+    })
+    .await
+    .map_err(|e| EditorError::Other(format!("highlight task failed: {e}")))?;
     {
         let mut reg = state.0.lock().map_err(|_| EditorError::LockPoisoned)?;
         reg.active_buffer_mut()?
-            .cache_hl_result(job.epoch, start, &spans);
+            .cache_hl_result(epoch, start, &spans);
     }
     Ok(spans)
 }
@@ -1219,6 +1264,23 @@ pub fn search(
         .map_err(|_| EditorError::LockPoisoned)?
         .active_buffer()?
         .search(&query, use_regex, case_sensitive)
+}
+
+/// Positional find (line/column) for the large-file read-only engine, where `search`
+/// can't return a global character index. Capped; `truncated` flags more beyond.
+#[tauri::command]
+pub fn search_positions(
+    query: String,
+    use_regex: bool,
+    case_sensitive: bool,
+    state: State<EditorState>,
+) -> Result<SearchPage, EditorError> {
+    state
+        .0
+        .lock()
+        .map_err(|_| EditorError::LockPoisoned)?
+        .active_buffer()?
+        .search_positions(&query, use_regex, case_sensitive)
 }
 
 #[derive(Serialize)]

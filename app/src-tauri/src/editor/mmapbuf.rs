@@ -194,16 +194,168 @@ impl Buffer for MmapBuffer {
         Ok(out)
     }
 
-    // Caret math is not used while read-only (the UI hides the caret), but the
-    // trait requires these; return harmless clamped values.
+    // Positional find for the read-only engine: scan each line, record matches as
+    // (line, char-col range). There is no global character index here, so matches
+    // are addressed by line/column, which is also all the UI needs to jump and
+    // highlight. Capped at MAX_SEARCH_MATCHES.
+    fn search_positions(
+        &self,
+        query: &str,
+        use_regex: bool,
+        case_sensitive: bool,
+    ) -> Result<super::SearchPage, EditorError> {
+        if query.is_empty() {
+            return Ok(super::SearchPage {
+                hits: Vec::new(),
+                truncated: false,
+            });
+        }
+        let bytes = match &self.mmap {
+            Some(m) => &m[..],
+            None => {
+                return Ok(super::SearchPage {
+                    hits: Vec::new(),
+                    truncated: false,
+                });
+            }
+        };
+        let re = super::search::build_regex(query, use_regex, case_sensitive)
+            .map_err(EditorError::Regex)?;
+        let mut hits = Vec::new();
+        let mut truncated = false;
+        'outer: for i in 0..self.line_starts.len() {
+            let a = self.line_starts[i];
+            let b = self
+                .line_starts
+                .get(i + 1)
+                .copied()
+                .unwrap_or(self.len_bytes)
+                .min(self.len_bytes)
+                .max(a);
+            let s = String::from_utf8_lossy(&bytes[a..b]);
+            // Match against the line without its trailing newline, so `$` anchors and
+            // the column math ignore the break.
+            let line_str = s
+                .strip_suffix('\n')
+                .map(|x| x.strip_suffix('\r').unwrap_or(x))
+                .unwrap_or(&s);
+            for m in re.find_iter(line_str) {
+                let col_start = line_str[..m.start()].chars().count();
+                let col_end = col_start + line_str[m.start()..m.end()].chars().count();
+                hits.push(super::SearchHit {
+                    line: i,
+                    col_start,
+                    col_end,
+                });
+                if hits.len() >= super::MAX_SEARCH_MATCHES {
+                    truncated = true;
+                    break 'outer;
+                }
+            }
+        }
+        Ok(super::SearchPage { hits, truncated })
+    }
+
+    // Caret math while read-only (the UI hides the blinking caret but still needs to
+    // scroll to a line for go-to-line, filter clicks and find navigation). The index
+    // is a byte offset, since read-only mode reports `char_count` as the byte length
+    // and `pos_to_char` returns byte offsets.
     fn pos_to_char(&self, line: usize, _col: usize) -> usize {
         self.line_starts.get(line).copied().unwrap_or(0)
     }
-    fn char_to_pos(&self, _char_idx: usize) -> CaretPos {
-        CaretPos { line: 0, col: 0 }
+    fn char_to_pos(&self, char_idx: usize) -> CaretPos {
+        let byte = char_idx.min(self.len_bytes);
+        // The line is the one whose start is the greatest start <= byte.
+        let line = match self.line_starts.binary_search(&byte) {
+            Ok(l) => l,
+            Err(l) => l.saturating_sub(1),
+        };
+        let start = self.line_starts.get(line).copied().unwrap_or(0);
+        let col = match &self.mmap {
+            Some(m) => {
+                let end = byte.max(start).min(self.len_bytes);
+                String::from_utf8_lossy(&m[start..end]).chars().count()
+            }
+            None => 0,
+        };
+        CaretPos { line, col }
     }
     fn meta(&self) -> DocumentMeta {
         self.make_meta()
     }
     fn rehighlight(&mut self) {}
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    // Write `contents` to a unique temp file and open an mmap buffer on it.
+    fn open_with(contents: &str) -> (MmapBuffer, PathBuf) {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path =
+            std::env::temp_dir().join(format!("tuhi-mmap-{}-{nanos}.txt", std::process::id()));
+        {
+            let mut f = File::create(&path).unwrap();
+            f.write_all(contents.as_bytes()).unwrap();
+        }
+        let mut b = MmapBuffer::default();
+        b.open(path.to_str().unwrap()).unwrap();
+        (b, path)
+    }
+
+    #[test]
+    fn search_positions_finds_line_and_columns() {
+        let (b, path) = open_with("alpha beta\nfind me here\nbeta beta\n");
+        let page = b.search_positions("beta", false, false).unwrap();
+        assert!(!page.truncated);
+        // "beta" appears once on line 0 (col 6) and twice on line 2 (cols 0 and 5).
+        let got: Vec<(usize, usize, usize)> = page
+            .hits
+            .iter()
+            .map(|h| (h.line, h.col_start, h.col_end))
+            .collect();
+        assert_eq!(got, vec![(0, 6, 10), (2, 0, 4), (2, 5, 9)]);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn search_positions_counts_columns_in_characters_not_bytes() {
+        // A multi-byte char before the match: the column must be a character count.
+        let (b, path) = open_with("café menu\n");
+        let page = b.search_positions("menu", false, false).unwrap();
+        assert_eq!(page.hits.len(), 1);
+        assert_eq!((page.hits[0].col_start, page.hits[0].col_end), (5, 9));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn search_positions_is_case_insensitive_by_default() {
+        let (b, path) = open_with("Hello HELLO hello\n");
+        let insensitive = b.search_positions("hello", false, false).unwrap();
+        assert_eq!(insensitive.hits.len(), 3);
+        let sensitive = b.search_positions("hello", false, true).unwrap();
+        assert_eq!(sensitive.hits.len(), 1);
+        assert_eq!(sensitive.hits[0].col_start, 12);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn char_to_pos_maps_byte_offset_to_line_and_column() {
+        let (b, path) = open_with("one\ntwo\nthree\n");
+        // Byte offset of line 2 start is 8 ("one\n" = 4, "two\n" = 4).
+        let start_of_three = b.pos_to_char(2, 0);
+        assert_eq!(start_of_three, 8);
+        let pos = b.char_to_pos(start_of_three);
+        assert_eq!((pos.line, pos.col), (2, 0));
+        // A byte inside line 1 maps back to that line with the right column.
+        let mid = b.char_to_pos(6); // 'o' of "two" is at byte 6, col 2
+        assert_eq!((mid.line, mid.col), (1, 2));
+        let _ = std::fs::remove_file(path);
+    }
 }
