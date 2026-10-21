@@ -358,9 +358,17 @@ html, body, #root {
   height: 38px;
   border-bottom: 1px solid var(--border);
   background: var(--panel);
+  /* Reserve room on the right so tabs never slide under the floating window
+     controls, which overhang the right gutter to reach the window edge. */
+  padding-right: 96px;
 }
-/* Window controls (the window is frameless; the top bar is the draggable title bar). */
-.winctl { display: flex; align-items: stretch; align-self: stretch; margin-left: 6px; flex: 0 0 auto; }
+/* Window controls (the window is frameless; the top bar is the draggable title bar).
+   Floated to the shell's true top-right corner, over the right gutter's cap, so the
+   close button is flush with the window edge rather than inset by the gutter. */
+.winctl {
+  position: absolute; top: 0; right: 0; height: 38px; z-index: 30;
+  display: flex; align-items: stretch;
+}
 .wc {
   width: 44px; border: none; background: transparent; color: var(--slate);
   display: grid; place-items: center; cursor: pointer;
