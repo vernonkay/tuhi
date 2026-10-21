@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { readText, writeText } from "@tauri-apps/plugin-clipboard-manager";
 import "./App.css";
@@ -211,7 +212,7 @@ const IS_MAC =
 const combo = (key: string) => (IS_MAC ? `⌘${key}` : `Ctrl+${key}`);
 
 /** The caret-over-a-line brand mark (docs/brand.md). Coral caret, ink line. */
-function Mark({ size = 18 }: { size?: number }) {
+function Mark({ size = 20 }: { size?: number }) {
   return (
     <svg
       className="mark"
@@ -246,43 +247,6 @@ function IconOpen() {
     </svg>
   );
 }
-function IconSearch() {
-  return (
-    <svg {...iconProps}>
-      <circle cx="11" cy="11" r="7" />
-      <path d="M21 21l-4.3-4.3" />
-    </svg>
-  );
-}
-function IconTree() {
-  return (
-    <svg {...iconProps}>
-      <path d="M3 6a1 1 0 0 1 1-1h5l2 2h9a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1z" />
-    </svg>
-  );
-}
-function IconList() {
-  return (
-    <svg {...iconProps}>
-      <path d="M4 6h16M4 12h16M4 18h10" />
-    </svg>
-  );
-}
-function IconCommand() {
-  return (
-    <svg {...iconProps}>
-      <rect x="4" y="4" width="16" height="16" rx="3" />
-      <path d="M8 9h8M8 13h5" />
-    </svg>
-  );
-}
-function IconFilter() {
-  return (
-    <svg {...iconProps}>
-      <path d="M3 5h18l-7 8v6l-4-2v-4z" />
-    </svg>
-  );
-}
 function IconFolder() {
   return (
     <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden style={{ width: 14, height: 14 }}>
@@ -298,15 +262,6 @@ function IconFile() {
     </svg>
   );
 }
-function IconSettings() {
-  return (
-    <svg {...iconProps}>
-      <circle cx="12" cy="12" r="3" />
-      <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
-    </svg>
-  );
-}
-
 function App() {
   const [meta, setMeta] = useState<DocumentMeta | null>(null);
   const [tabs, setTabs] = useState<TabSummary[]>([]);
@@ -329,7 +284,7 @@ function App() {
 
   // Studio chrome: one left panel showing Files OR Outline (rail switches it), plus
   // the command palette. `null` = the left panel is collapsed.
-  const [leftPanel, setLeftPanel] = useState<"files" | "outline" | null>("files");
+  const [leftPanel, setLeftPanel] = useState<"files" | "outline" | null>(null);
   const [treeWidth, setTreeWidth] = useState<number>(() => {
     try {
       const w = Number(localStorage.getItem("tuhi.treeWidth"));
@@ -495,7 +450,6 @@ function App() {
   // was noise, and the only thing it gave you was a tree you had to climb back out of.
   useEffect(() => {
     void (async () => {
-      setLeftPanel("files");
       let last: { path: string } | null = null;
       try {
         const raw = localStorage.getItem(LS_LAST_FOLDER);
@@ -1434,6 +1388,27 @@ function App() {
     scrollerRef.current?.focus();
   }, []);
 
+  // Esc closes whatever chrome is open, topmost first: a modal, then find/filter, then a
+  // gutter panel. (A second click on the same dot toggles it closed too.) Find and the
+  // palette also handle Esc on their own focused inputs; this covers everything else.
+  useEffect(() => {
+    const anyOpen =
+      settingsOpen || hlEditorOpen || paletteOpen || filterOpen || findOpen || leftPanel !== null;
+    if (!anyOpen) return;
+    const onEsc = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      e.preventDefault();
+      if (settingsOpen) setSettingsOpen(false);
+      else if (hlEditorOpen) closeHlEditor();
+      else if (paletteOpen) setPaletteOpen(false);
+      else if (filterOpen) closeFilter();
+      else if (findOpen) closeFind();
+      else if (leftPanel) setLeftPanel(null);
+    };
+    window.addEventListener("keydown", onEsc);
+    return () => window.removeEventListener("keydown", onEsc);
+  }, [settingsOpen, hlEditorOpen, paletteOpen, filterOpen, findOpen, leftPanel, closeHlEditor, closeFilter, closeFind]);
+
   // Re-run the search as the query or options change while the bar is open.
   useEffect(() => {
     if (findOpen) void runSearch(findQuery);
@@ -1853,54 +1828,72 @@ function App() {
   };
 
   return (
-    <div className="shell">
-      <nav className="rail">
+    <div className="shell tg">
+      <aside className="gut gut-l">
+        <div className="gut-cap">
+          <Mark size={20} />
+        </div>
         <button
-          className={`rail-btn${leftPanel === "files" ? " on" : ""}`}
-          onClick={() => setLeftPanel((v) => (v === "files" ? null : "files"))}
+          className={`gut-dot-btn${leftPanel === "files" ? " on" : ""}`}
+          onClick={() => {
+            if (leftPanel === "files") setLeftPanel(null);
+            else {
+              closeFind();
+              closeFilter();
+              setLeftPanel("files");
+            }
+          }}
           title="Files"
         >
-          <IconTree />
+          <span className="gd" />
+          <span className="gd-label">Files</span>
         </button>
         <button
-          className={`rail-btn${leftPanel === "outline" ? " on" : ""}`}
-          onClick={() => setLeftPanel((v) => (v === "outline" ? null : "outline"))}
-          disabled={!meta}
-          title="Outline"
-        >
-          <IconList />
-        </button>
-        <button
-          className={`rail-btn${findOpen ? " on" : ""}`}
-          onClick={() => (findOpen ? closeFind() : openFind(false))}
+          className={`gut-dot-btn${findOpen ? " on" : ""}`}
+          onClick={() => {
+            if (findOpen) closeFind();
+            else {
+              setLeftPanel(null);
+              closeFilter();
+              openFind(false);
+            }
+          }}
           disabled={!meta || readonly}
-          title="Find (Ctrl+F)"
+          title={`Find (${combo("F")})`}
         >
-          <IconSearch />
+          <span className="gd" />
+          <span className="gd-label">Find</span>
         </button>
         <button
-          className={`rail-btn${filterOpen ? " on" : ""}`}
-          onClick={() => (filterOpen ? closeFilter() : openFilter())}
+          className={`gut-dot-btn${filterOpen ? " on" : ""}`}
+          onClick={() => {
+            if (filterOpen) closeFilter();
+            else {
+              setLeftPanel(null);
+              closeFind();
+              openFilter();
+            }
+          }}
           disabled={!meta}
           title="Filter lines to view"
         >
-          <IconFilter />
+          <span className="gd" />
+          <span className="gd-label">Filter</span>
         </button>
-        <button className="rail-btn" onClick={openPalette} title={`Command palette (${combo("P")})`}>
-          <IconCommand />
+        <button className="gut-dot-btn" onClick={openPalette} title={`Command palette (${combo("P")})`}>
+          <span className="gd" />
+          <span className="gd-label">Commands</span>
         </button>
-        <div className="rail-spacer" />
-        <button className="rail-btn" onClick={() => setSettingsOpen(true)} title="Settings">
-          <IconSettings />
+        <button className="gut-dot-btn" onClick={() => setSettingsOpen(true)} title="Settings">
+          <span className="gd" />
+          <span className="gd-label">Settings</span>
         </button>
-      </nav>
+        <div className="gut-sp" />
+        <div className="gut-tag">FILES</div>
+      </aside>
       <div className="main">
-      <header className="topbar">
-        <div className="brandcell">
-          <Mark size={26} />
-          <span className="brand-word">tuhi</span>
-        </div>
-        <div className="tabstrip">
+      <header className="topbar" data-tauri-drag-region>
+        <div className="tabstrip" data-tauri-drag-region>
           {tabs.map((t) => (
             <div
               key={t.id}
@@ -1932,10 +1925,30 @@ function App() {
           ))}
         </div>
         {busy && <span className="busy">Opening…</span>}
+        <div className="winctl">
+          <button className="wc" onClick={() => void getCurrentWindow().minimize()} title="Minimize" aria-label="Minimize">
+            <svg viewBox="0 0 10 10" aria-hidden>
+              <path d="M1 5h8" />
+            </svg>
+          </button>
+          <button className="wc" onClick={() => void getCurrentWindow().toggleMaximize()} title="Maximize" aria-label="Maximize">
+            <svg viewBox="0 0 10 10" aria-hidden>
+              <rect x="1" y="1" width="8" height="8" rx="1.2" />
+            </svg>
+          </button>
+          <button className="wc wc-close" onClick={() => void getCurrentWindow().close()} title="Close" aria-label="Close">
+            <svg viewBox="0 0 10 10" aria-hidden>
+              <path d="M1 1l8 8M9 1l-8 8" />
+            </svg>
+          </button>
+        </div>
       </header>
       <div className="body">
       {leftPanel && (
-        <aside className="filetree" style={{ flex: `0 0 ${treeWidth}px`, width: treeWidth }}>
+        <aside
+          className={`over ${leftPanel === "outline" ? "over-r" : "over-l"}`}
+          style={{ width: treeWidth }}
+        >
           {leftPanel === "files" ? (
             <>
               <div className="ft-head">
@@ -1947,6 +1960,7 @@ function App() {
                 <button className="ft-icn" onClick={() => void openFolder()} title="Open folder…">
                   <IconFolder />
                 </button>
+                <button className="over-close" onClick={() => setLeftPanel(null)} title="Close">×</button>
               </div>
               <div className="ft-body">
                 {folderRoot ? (
@@ -1995,7 +2009,10 @@ function App() {
             </>
           ) : (
             <>
-              <div className="op-head">Outline</div>
+              <div className="op-head" style={{ display: "flex", alignItems: "center" }}>
+                Outline
+                <button className="over-close" style={{ marginLeft: "auto" }} onClick={() => setLeftPanel(null)} title="Close">×</button>
+              </div>
               {outline.length > 12 && (
                 <input
                   className="op-filter"
@@ -2035,16 +2052,14 @@ function App() {
               </div>
             </>
           )}
+          <div
+            className="ft-resizer"
+            onMouseDown={startTreeResize}
+            title="Drag to resize"
+            role="separator"
+            aria-orientation="vertical"
+          />
         </aside>
-      )}
-      {leftPanel && (
-        <div
-          className="ft-resizer"
-          onMouseDown={startTreeResize}
-          title="Drag to resize"
-          role="separator"
-          aria-orientation="vertical"
-        />
       )}
       <div className="app">
 
@@ -2253,6 +2268,27 @@ function App() {
       </div>
       </div>
       </div>
+      <aside className="gut gut-r">
+        <div className="gut-cap" />
+        <button
+          className={`gut-dot-btn${leftPanel === "outline" ? " on" : ""}`}
+          onClick={() => {
+            if (leftPanel === "outline") setLeftPanel(null);
+            else {
+              closeFind();
+              closeFilter();
+              setLeftPanel("outline");
+            }
+          }}
+          disabled={!meta}
+          title="Outline"
+        >
+          <span className="gd" />
+          <span className="gd-label">Outline</span>
+        </button>
+        <div className="gut-sp" />
+        <div className="gut-tag">OUTLINE</div>
+      </aside>
       {paletteOpen && (
         <div className="palette-overlay" onMouseDown={() => setPaletteOpen(false)}>
           <div className="palette-modal" onMouseDown={(e) => e.stopPropagation()}>
