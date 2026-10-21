@@ -450,7 +450,6 @@ function App() {
   // was noise, and the only thing it gave you was a tree you had to climb back out of.
   useEffect(() => {
     void (async () => {
-      setLeftPanel("files");
       let last: { path: string } | null = null;
       try {
         const raw = localStorage.getItem(LS_LAST_FOLDER);
