@@ -607,6 +607,9 @@ function App() {
   const caretRef = useRef<Caret | null>(null);
   const anchorRef = useRef<number | null>(null);
   const charCountRef = useRef(0);
+  // Whether the active file is Markdown, read synchronously by the viewport-highlight
+  // decision (Markdown source is coloured lazily, one visible window at a time).
+  const isMarkdownRef = useRef(false);
   const typeBufRef = useRef(""); // characters typed but not yet sent to Rust
   const typeAtRef = useRef(0); // char index where the buffered run begins
   const flushRaf = useRef<number | null>(null); // pending requestAnimationFrame handle
@@ -736,8 +739,10 @@ function App() {
         setRangeStart(start);
         rangeStartRef.current = start;
         setWindowBase(base);
-        // Large files carry no eager highlights; colour the visible window on demand.
-        if (charCountRef.current > HIGHLIGHT_MAX_CHARS) {
+        // Colour the visible window on demand for files with no eager whole-document
+        // highlights: large files (over the cap) and Markdown at any size (its source
+        // view is never whole-document highlighted).
+        if (charCountRef.current > HIGHLIGHT_MAX_CHARS || isMarkdownRef.current) {
           requestViewportHighlight(start, got.length);
         }
       } catch (e) {
@@ -756,8 +761,15 @@ function App() {
   }, [meta, fetchViewport]);
 
   useEffect(() => {
+    isMarkdownRef.current = isMarkdown;
+  }, [isMarkdown]);
+
+  // Fetch the source viewport on open AND when toggling out of preview into source: the
+  // scroller isn't mounted while the preview shows, so without the `showLive` dependency
+  // the first source render would be stale/empty until a scroll (the toggle "stutter").
+  useEffect(() => {
     recomputeViewport();
-  }, [meta, recomputeViewport]);
+  }, [meta, recomputeViewport, showLive]);
 
   // Refresh the outline when the active document changes (open/switch/close); edits
   // refresh it via the debounced rehighlight below.

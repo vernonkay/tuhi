@@ -799,13 +799,17 @@ impl Buffer for RopeBuffer {
     }
 
     fn take_hl_job(&mut self) -> Option<HlJob> {
-        // Over-cap, known-type files only; under-cap and plain files use `highlights`,
-        // and an empty extension has nothing to detect a syntax from. Markdown is never
-        // highlighted (see `is_markdown_ext`), so it takes no viewport-highlight job either.
-        let over_cap = self.rope.len_bytes() > HIGHLIGHT_MAX_BYTES
-            && !self.ext.is_empty()
-            && !is_markdown_ext(&self.ext);
-        if !over_cap {
+        // A viewport-highlight job is produced for two cases: an over-cap file (not
+        // whole-document highlighted, so its visible window is coloured on demand) and
+        // Markdown at ANY size. Markdown is never whole-document highlighted (syntect's md
+        // grammar is far too slow — see `is_markdown_ext`), so its SOURCE view is coloured
+        // lazily, one visible window at a time, off the UI thread. An empty extension has
+        // no syntax to detect.
+        if self.ext.is_empty() {
+            return None;
+        }
+        let wants_job = is_markdown_ext(&self.ext) || self.rope.len_bytes() > HIGHLIGHT_MAX_BYTES;
+        if !wants_job {
             return None;
         }
         Some(HlJob {
@@ -1641,10 +1645,11 @@ mod tests {
     }
 
     #[test]
-    fn markdown_is_not_syntax_highlighted() {
-        // Markdown is rendered in the preview, not highlighted as source, so it produces
-        // no highlight spans and takes no viewport-highlight job — this is what keeps
-        // opening a Markdown file fast (syntect's md grammar is pathologically slow).
+    fn markdown_is_not_eagerly_highlighted_but_takes_a_viewport_job() {
+        // Markdown is never whole-document highlighted (syntect's md grammar is far too
+        // slow — that was the open-time stall), so `highlights` stays empty. Its source
+        // view is instead coloured lazily per visible window, so it DOES take a
+        // viewport-highlight job.
         let mut md = RopeBuffer {
             ext: "md".into(),
             ..Default::default()
@@ -1652,13 +1657,17 @@ mod tests {
         md.insert(0, "# Heading\n\nSome **bold** text with `code`.\n")
             .unwrap();
         md.rehighlight();
-        assert!(md.highlights.is_empty(), "markdown must not be highlighted");
         assert!(
-            md.take_hl_job().is_none(),
-            "markdown takes no viewport-highlight job"
+            md.highlights.is_empty(),
+            "markdown must not be eagerly (whole-document) highlighted"
+        );
+        assert!(
+            md.take_hl_job().is_some(),
+            "markdown is coloured lazily, one visible window at a time"
         );
 
-        // A code file is still highlighted (control), so the skip is markdown-specific.
+        // A small code file is still whole-document highlighted (control): the eager skip
+        // is markdown-specific.
         let mut rs = RopeBuffer {
             ext: "rs".into(),
             ..Default::default()
