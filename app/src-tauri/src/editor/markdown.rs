@@ -26,6 +26,29 @@ pub struct InlineRun {
     pub href: Option<String>,
 }
 
+/// A rendered table: per-column alignment plus header and body cells, each cell its own
+/// list of inline runs. Lets the frontend draw a real `<table>` rather than raw pipes.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+pub struct TableData {
+    /// Per-column alignment: "left" | "center" | "right" | "none".
+    pub aligns: Vec<String>,
+    /// Header cells (one run list per cell).
+    pub header: Vec<Vec<InlineRun>>,
+    /// Body rows, each a list of cells.
+    pub rows: Vec<Vec<Vec<InlineRun>>>,
+}
+
+fn align_str(a: pulldown_cmark::Alignment) -> String {
+    use pulldown_cmark::Alignment::*;
+    match a {
+        Left => "left",
+        Center => "center",
+        Right => "right",
+        None => "none",
+    }
+    .to_string()
+}
+
 /// What a block is. Serialized with an internal `kind` tag plus its fields.
 #[derive(Serialize, Clone, Debug, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -70,6 +93,8 @@ pub struct Block {
     /// a code body without its fences) this is always the literal source slice, and
     /// is filled uniformly for every block in a post-pass from the line spans.
     pub source: String,
+    /// Structured table (header, rows, alignments) when `kind` is Table, else `None`.
+    pub table: Option<TableData>,
 }
 
 /// The text block currently being assembled (heading / paragraph / list item / quote).
@@ -78,6 +103,17 @@ struct Pending {
     start_byte: usize,
     end_byte: usize,
     inlines: Vec<InlineRun>,
+}
+
+/// The table currently being assembled from pulldown-cmark's table events. Header cells
+/// and each body row are collected into `cur_row`, then moved into `header` / `rows`.
+struct TableBuild {
+    start_byte: usize,
+    aligns: Vec<String>,
+    header: Vec<Vec<InlineRun>>,
+    rows: Vec<Vec<Vec<InlineRun>>>,
+    cur_row: Vec<Vec<InlineRun>>,
+    cur_cell: Vec<InlineRun>,
 }
 
 /// Parse `text` into blocks with resolved line spans. A document with no content
@@ -97,6 +133,7 @@ pub fn parse_blocks(text: &str) -> Vec<Block> {
             inlines: p.inlines,
             raw: String::new(),
             source: String::new(),
+            table: None,
         }
     };
 
@@ -122,9 +159,8 @@ pub fn parse_blocks(text: &str) -> Vec<Block> {
     let mut code_lang: Option<String> = None;
     let mut code_start = 0usize;
     let mut code_text = String::new();
-    // Table / html raw accumulation.
-    let mut raw_kind: Option<BlockKind> = None;
-    let mut raw_start = 0usize;
+    // The structured table currently being assembled (built into a `TableData`).
+    let mut table: Option<TableBuild> = None;
 
     let push_run = |inlines: &mut Vec<InlineRun>,
                     s: &str,
@@ -243,22 +279,61 @@ pub fn parse_blocks(text: &str) -> Vec<Block> {
                         inlines: Vec::new(),
                         raw: code_text.clone(),
                         source: String::new(),
+                        table: None,
                     });
                 }
             }
-            Event::Start(Tag::Table(_)) => {
-                raw_kind = Some(BlockKind::Table);
-                raw_start = range.start;
+            Event::Start(Tag::Table(aligns)) => {
+                table = Some(TableBuild {
+                    start_byte: range.start,
+                    aligns: aligns.into_iter().map(align_str).collect(),
+                    header: Vec::new(),
+                    rows: Vec::new(),
+                    cur_row: Vec::new(),
+                    cur_cell: Vec::new(),
+                });
+            }
+            Event::Start(Tag::TableHead) | Event::Start(Tag::TableRow) => {
+                if let Some(tb) = table.as_mut() {
+                    tb.cur_row = Vec::new();
+                }
+            }
+            Event::Start(Tag::TableCell) => {
+                if let Some(tb) = table.as_mut() {
+                    tb.cur_cell = Vec::new();
+                }
+            }
+            Event::End(TagEnd::TableCell) => {
+                if let Some(tb) = table.as_mut() {
+                    let cell = std::mem::take(&mut tb.cur_cell);
+                    tb.cur_row.push(cell);
+                }
+            }
+            Event::End(TagEnd::TableHead) => {
+                if let Some(tb) = table.as_mut() {
+                    tb.header = std::mem::take(&mut tb.cur_row);
+                }
+            }
+            Event::End(TagEnd::TableRow) => {
+                if let Some(tb) = table.as_mut() {
+                    let row = std::mem::take(&mut tb.cur_row);
+                    tb.rows.push(row);
+                }
             }
             Event::End(TagEnd::Table) => {
-                if let Some(kind) = raw_kind.take() {
+                if let Some(tb) = table.take() {
                     blocks.push(Block {
-                        kind,
-                        start_line: line_of(raw_start),
+                        kind: BlockKind::Table,
+                        start_line: line_of(tb.start_byte),
                         end_line: line_of(range.end.saturating_sub(1)) + 1,
                         inlines: Vec::new(),
-                        raw: text[raw_start..range.end].to_string(),
+                        raw: text[tb.start_byte..range.end].to_string(),
                         source: String::new(),
+                        table: Some(TableData {
+                            aligns: tb.aligns,
+                            header: tb.header,
+                            rows: tb.rows,
+                        }),
                     });
                 }
             }
@@ -270,6 +345,7 @@ pub fn parse_blocks(text: &str) -> Vec<Block> {
                     inlines: Vec::new(),
                     raw: String::new(),
                     source: String::new(),
+                    table: None,
                 });
             }
             Event::Text(t) => {
@@ -279,6 +355,16 @@ pub fn parse_blocks(text: &str) -> Vec<Block> {
                     p.end_byte = range.end;
                     push_run(
                         &mut p.inlines,
+                        &t,
+                        bold > 0,
+                        italic > 0,
+                        false,
+                        strike > 0,
+                        &href,
+                    );
+                } else if let Some(tb) = table.as_mut() {
+                    push_run(
+                        &mut tb.cur_cell,
                         &t,
                         bold > 0,
                         italic > 0,
@@ -300,6 +386,16 @@ pub fn parse_blocks(text: &str) -> Vec<Block> {
                         strike > 0,
                         &href,
                     );
+                } else if let Some(tb) = table.as_mut() {
+                    push_run(
+                        &mut tb.cur_cell,
+                        &t,
+                        bold > 0,
+                        italic > 0,
+                        true,
+                        strike > 0,
+                        &href,
+                    );
                 }
             }
             Event::SoftBreak | Event::HardBreak => {
@@ -314,11 +410,23 @@ pub fn parse_blocks(text: &str) -> Vec<Block> {
                         strike > 0,
                         &href,
                     );
+                } else if let Some(tb) = table.as_mut() {
+                    push_run(
+                        &mut tb.cur_cell,
+                        " ",
+                        bold > 0,
+                        italic > 0,
+                        false,
+                        strike > 0,
+                        &href,
+                    );
                 }
             }
             // A block-level HTML run becomes its own block; inline HTML inside a
             // paragraph is left to that paragraph (dropped for now).
-            Event::Html(_) | Event::InlineHtml(_) if pending.is_none() && code_lang.is_none() => {
+            Event::Html(_) | Event::InlineHtml(_)
+                if pending.is_none() && code_lang.is_none() && table.is_none() =>
+            {
                 blocks.push(Block {
                     kind: BlockKind::Html,
                     start_line: line_of(range.start),
@@ -326,6 +434,7 @@ pub fn parse_blocks(text: &str) -> Vec<Block> {
                     inlines: Vec::new(),
                     raw: text[range.start..range.end].to_string(),
                     source: String::new(),
+                    table: None,
                 });
             }
             Event::End(end @ (TagEnd::Heading(_) | TagEnd::Paragraph | TagEnd::Item)) => {
@@ -525,6 +634,25 @@ mod tests {
         assert_eq!(b[0].kind, BlockKind::Table);
         assert!(b[0].raw.contains("| a | b |"));
         assert_eq!(b[0].start_line, 0);
+    }
+
+    #[test]
+    fn table_has_structured_header_rows_and_aligns() {
+        let md = "| a | b |\n|:--|--:|\n| 1 | **2** |\n";
+        let b = parse_blocks(md);
+        assert_eq!(b.len(), 1);
+        let t = b[0].table.as_ref().expect("structured table data");
+        assert_eq!(t.aligns, vec!["left", "right"]);
+        assert_eq!(t.header.len(), 2);
+        assert_eq!(t.header[0][0].text, "a");
+        assert_eq!(t.header[1][0].text, "b");
+        assert_eq!(t.rows.len(), 1);
+        assert_eq!(t.rows[0].len(), 2);
+        assert_eq!(t.rows[0][0][0].text, "1");
+        assert!(
+            t.rows[0][1].iter().any(|r| r.text == "2" && r.bold),
+            "bold cell content resolves"
+        );
     }
 
     #[test]

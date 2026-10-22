@@ -4,6 +4,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { ask, open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { readText, writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { useVirtualizer } from "@tanstack/react-virtual";
+import hljs from "highlight.js/lib/common";
 import "./App.css";
 
 /** Mirror of the Rust `DocumentMeta` (editor/mod.rs). */
@@ -82,6 +83,13 @@ interface MdRun {
   href: string | null;
 }
 
+/** Structured table data (mirror of Rust `TableData`). */
+interface MdTable {
+  aligns: string[];
+  header: MdRun[][];
+  rows: MdRun[][][];
+}
+
 /** One Markdown block with its source line span (mirror of Rust `Block`). */
 interface MdBlock {
   kind: "heading" | "paragraph" | "list_item" | "quote" | "code" | "table" | "rule" | "html";
@@ -97,6 +105,8 @@ interface MdBlock {
   raw: string;
   /** The block's verbatim source lines, for edit-in-place (mirror of Rust `source`). */
   source: string;
+  /** Structured table (mirror of Rust `table`), present when kind is "table". */
+  table?: MdTable | null;
 }
 
 /** Mirror of the Rust `DirEntry` (one file-tree row). */
@@ -2198,14 +2208,68 @@ function App() {
           </div>
         );
       }
-      case "code":
+      case "code": {
+        const code = b.raw.replace(/\n$/, "");
+        // Highlight only when the language is known (no expensive auto-detect); fall back
+        // to plain, escaped text otherwise. hljs output is sanitized token markup.
+        let html: string | null = null;
+        if (b.lang && hljs.getLanguage(b.lang)) {
+          try {
+            html = hljs.highlight(code, { language: b.lang }).value;
+          } catch {
+            html = null;
+          }
+        }
         return (
           <pre key={i} className="md-codeblock" data-lang={b.lang || undefined}>
-            <code>{b.raw.replace(/\n$/, "")}</code>
+            {html ? (
+              <code className="hljs" dangerouslySetInnerHTML={{ __html: html }} />
+            ) : (
+              <code>{code}</code>
+            )}
           </pre>
         );
-      case "table":
-        return <pre key={i} className="md-raw" data-tag="table">{b.raw.replace(/\n$/, "")}</pre>;
+      }
+      case "table": {
+        const t = b.table;
+        if (!t) {
+          return (
+            <pre key={i} className="md-raw" data-tag="table">
+              {b.raw.replace(/\n$/, "")}
+            </pre>
+          );
+        }
+        const align = (c: number): "left" | "center" | "right" | undefined => {
+          const a = t.aligns[c];
+          return a === "left" || a === "center" || a === "right" ? a : undefined;
+        };
+        return (
+          <div key={i} className="md-table-wrap">
+            <table className="md-table">
+              <thead>
+                <tr>
+                  {t.header.map((cell, c) => (
+                    <th key={c} style={{ textAlign: align(c) }}>
+                      {renderInline(cell)}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {t.rows.map((row, r) => (
+                  <tr key={r}>
+                    {row.map((cell, c) => (
+                      <td key={c} style={{ textAlign: align(c) }}>
+                        {renderInline(cell)}
+                      </td>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        );
+      }
       case "rule":
         return <hr key={i} className="md-rule" />;
       case "html":
