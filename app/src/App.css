@@ -848,12 +848,13 @@ html, body, #root {
 .mdview:not(.editing) .md-editable:hover {
   background: var(--coral-soft); box-shadow: inset 3px 0 0 var(--coral);
 }
-.mdview:not(.editing) .md-editable::after {
+/* The pencil is generated only on hover — defining it on every .md-editable would
+   create thousands of absolutely-positioned pseudo-elements in a large preview and
+   stall the WebView's layout. */
+.mdview:not(.editing) .md-editable:hover::after {
   content: "✎"; position: absolute; left: -26px; top: 0.15em;
-  color: var(--coral); opacity: 0; font-size: 0.85em;
-  pointer-events: none; transition: opacity 0.1s;
+  color: var(--coral); opacity: 0.75; font-size: 0.85em; pointer-events: none;
 }
-.mdview:not(.editing) .md-editable:hover::after { opacity: 0.75; }
 
 /* The open block, swapped to its raw Markdown source. */
 .md-blockedit { margin: 0 0 0.9em; }
@@ -867,3 +868,12 @@ html, body, #root {
   margin-top: 4px; font-family: var(--ui-font); font-size: 11px; color: var(--slate);
 }
 .md-blockedit-hint b { font-weight: 600; color: var(--ink); }
+
+/* Shown when a document has too many blocks to preview as one DOM tree. */
+.md-toobig { color: var(--slate); font-family: var(--ui-font); padding: 8px 0 24px; }
+.md-toobig p { margin: 0 0 14px; max-width: 48ch; }
+.md-toobig-btn {
+  font: inherit; color: var(--coral); background: var(--coral-soft);
+  border: 1px solid var(--coral); border-radius: 6px; padding: 6px 14px; cursor: pointer;
+}
+.md-toobig-btn:hover { background: var(--coral); color: var(--paper); }

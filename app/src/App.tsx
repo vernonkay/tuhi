@@ -248,6 +248,13 @@ const HIGHLIGHT_MAX_CHARS = 2 * 1024 * 1024;
 // size) and the preview toggle is disabled. Lifting this needs a virtualized preview.
 const MD_PREVIEW_MAX_CHARS = 512 * 1024;
 
+// A second, finer guard: even under the char cap the preview builds one DOM node per
+// block up front, so a block-dense document (heading- or list-heavy) can create several
+// thousand nodes and stall the WebView's layout. Above this many blocks the preview
+// shows a notice and offers source instead of building the tree. The proper fix that
+// lifts this is a virtualized preview (render only the visible blocks) — see the roadmap.
+const MD_PREVIEW_MAX_BLOCKS = 2500;
+
 /** Platform-appropriate shortcut label: "⌘O" on macOS, "Ctrl+O" elsewhere. */
 const IS_MAC =
   typeof navigator !== "undefined" && /Mac|iPhone|iPad|iPod/.test(navigator.platform || navigator.userAgent || "");
@@ -350,6 +357,10 @@ function App() {
   const [editSource, setEditSource] = useState(false);
   const [blocks, setBlocks] = useState<MdBlock[]>([]);
   const [blocksLoading, setBlocksLoading] = useState(false);
+  // Set when a document parses to more than MD_PREVIEW_MAX_BLOCKS blocks: the preview
+  // shows a notice instead of rendering the (huge) tree, so the WebView never stalls.
+  const [previewBlocked, setPreviewBlocked] = useState(false);
+  const [previewBlockCount, setPreviewBlockCount] = useState(0);
   // Edit-in-place: the index of the block currently open as raw source (or null).
   // The ref mirrors it so blur/commit handlers read a synchronous value, and the
   // skip flag lets Esc cancel without the imminent blur committing.
@@ -412,7 +423,16 @@ function App() {
     // re-parse doesn't flash; the loading flag suppresses the "empty" message meanwhile.
     setBlocksLoading(true);
     try {
-      setBlocks(await invoke<MdBlock[]>("markdown_blocks"));
+      const result = await invoke<MdBlock[]>("markdown_blocks");
+      if (result.length > MD_PREVIEW_MAX_BLOCKS) {
+        // Too many blocks to render as one DOM tree: show a notice, never build it.
+        setPreviewBlockCount(result.length);
+        setPreviewBlocked(true);
+        setBlocks([]);
+      } else {
+        setPreviewBlocked(false);
+        setBlocks(result);
+      }
     } catch (e) {
       setError(String(e));
       setBlocks([]);
@@ -767,6 +787,7 @@ function App() {
     setEditBlock(null);
     editBlockRef.current = null;
     setBlocks([]);
+    setPreviewBlocked(false);
   }, [showLive, activeTabId, meta?.path]);
 
   const ensureCaretVisible = useCallback((line: number) => {
@@ -2514,11 +2535,23 @@ function App() {
       {showLive ? (
       <div className={`mdview${editBlock != null ? " editing" : ""}`} tabIndex={0}>
         <div className="mdview-inner" onClick={onPreviewClick}>
-          {blocks.length
-            ? blocks.map(renderBlockEditable)
-            : blocksLoading
-              ? <p className="md-empty">Rendering…</p>
-              : <p className="md-empty">This document is empty.</p>}
+          {previewBlocked ? (
+            <div className="md-toobig">
+              <p>
+                This document is {previewBlockCount.toLocaleString()} blocks — too many to
+                preview smoothly yet. You can edit it as raw Markdown instead.
+              </p>
+              <button className="md-toobig-btn" onClick={() => setEditSource(true)}>
+                Edit as source
+              </button>
+            </div>
+          ) : blocks.length ? (
+            blocks.map(renderBlockEditable)
+          ) : blocksLoading ? (
+            <p className="md-empty">Rendering…</p>
+          ) : (
+            <p className="md-empty">This document is empty.</p>
+          )}
         </div>
       </div>
       ) : (
