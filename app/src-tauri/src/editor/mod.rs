@@ -25,6 +25,7 @@ use tauri::State;
 mod encoding;
 mod error;
 mod highlight;
+mod markdown;
 mod mmapbuf;
 mod search;
 use encoding::Encoding;
@@ -1281,6 +1282,23 @@ pub fn search_positions(
         .map_err(|_| EditorError::LockPoisoned)?
         .active_buffer()?
         .search_positions(&query, use_regex, case_sensitive)
+}
+
+/// Parse the active document into Markdown blocks (with source line spans) for the live
+/// (hybrid) preview. Async with the parse on a blocking worker, so a large document never
+/// stalls the UI thread (see the request_highlight note). Read-only large files return no
+/// blocks (their `text()` is empty), which is correct: live preview is for editable files.
+#[tauri::command]
+pub async fn markdown_blocks(
+    state: State<'_, EditorState>,
+) -> Result<Vec<markdown::Block>, EditorError> {
+    let text = {
+        let reg = state.0.lock().map_err(|_| EditorError::LockPoisoned)?;
+        reg.active_buffer()?.text()
+    };
+    tauri::async_runtime::spawn_blocking(move || markdown::parse_blocks(&text))
+        .await
+        .map_err(|e| EditorError::Other(format!("markdown parse failed: {e}")))
 }
 
 #[derive(Serialize)]

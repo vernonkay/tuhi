@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { createElement, Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
@@ -69,6 +69,31 @@ interface Span {
   start: number;
   end: number;
   color: string;
+}
+
+/** A styled inline run in a Markdown block (mirror of Rust `InlineRun`). */
+interface MdRun {
+  text: string;
+  bold: boolean;
+  italic: boolean;
+  code: boolean;
+  strike: boolean;
+  href: string | null;
+}
+
+/** One Markdown block with its source line span (mirror of Rust `Block`). */
+interface MdBlock {
+  kind: "heading" | "paragraph" | "list_item" | "quote" | "code" | "table" | "rule" | "html";
+  level?: number;
+  ordered?: boolean;
+  number?: number;
+  depth?: number;
+  checked?: boolean | null;
+  lang?: string;
+  start_line: number;
+  end_line: number;
+  inlines: MdRun[];
+  raw: string;
 }
 
 /** Mirror of the Rust `DirEntry` (one file-tree row). */
@@ -309,6 +334,9 @@ function App() {
   const [outline, setOutline] = useState<OutlineItem[]>([]);
   const [outlineQuery, setOutlineQuery] = useState("");
   const [outlineExpanded, setOutlineExpanded] = useState<Set<number>>(new Set());
+  // Live (hybrid) Markdown preview.
+  const [livePreview, setLivePreview] = useState(false);
+  const [blocks, setBlocks] = useState<MdBlock[]>([]);
   const [filterOpen, setFilterOpen] = useState(false);
   const [filterQuery, setFilterQuery] = useState("");
   const [filterMatches, setFilterMatches] = useState<FilterMatch[]>([]);
@@ -356,6 +384,15 @@ function App() {
       setOutline(await invoke<OutlineItem[]>("get_outline"));
     } catch {
       setOutline([]);
+    }
+  }, []);
+
+  const refreshBlocks = useCallback(async () => {
+    try {
+      setBlocks(await invoke<MdBlock[]>("markdown_blocks"));
+    } catch (e) {
+      setError(String(e));
+      setBlocks([]);
     }
   }, []);
 
@@ -556,6 +593,10 @@ function App() {
 
   const lineCount = meta?.line_count ?? 0;
   const readonly = meta?.readonly ?? false;
+  const isMarkdown = !!meta?.path && /\.(md|markdown|mdx)$/i.test(meta.path);
+  // Live preview renders only for an editable Markdown file; non-markdown or large
+  // read-only files keep the plain editor even if the toggle is left on.
+  const showLive = livePreview && !!meta && isMarkdown && !readonly;
 
   useEffect(() => {
     const measure = () => {
@@ -679,6 +720,14 @@ function App() {
     else setOutline([]);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTabId, meta?.path, refreshOutline]);
+
+  // Re-parse Markdown blocks while live preview is showing: on open/switch and after
+  // edits (char_count moves). Keyed on the content length rather than every keystroke.
+  useEffect(() => {
+    if (showLive) void refreshBlocks();
+    else setBlocks([]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showLive, activeTabId, meta?.path, meta?.char_count, refreshBlocks]);
 
   const ensureCaretVisible = useCallback((line: number) => {
     const el = scrollerRef.current;
@@ -1843,6 +1892,64 @@ function App() {
     }
   }
 
+  // ---- live Markdown preview rendering ----
+  const renderInline = (runs: MdRun[]): React.ReactNode =>
+    runs.map((r, i) => {
+      let el: React.ReactNode = r.code ? <code className="md-code">{r.text}</code> : r.text;
+      if (r.strike) el = <s>{el}</s>;
+      if (r.italic) el = <em>{el}</em>;
+      if (r.bold) el = <strong>{el}</strong>;
+      if (r.href) {
+        el = (
+          <a className="md-link" href={r.href} title={r.href} onClick={(e) => e.preventDefault()}>
+            {el}
+          </a>
+        );
+      }
+      return <Fragment key={i}>{el}</Fragment>;
+    });
+
+  const renderBlock = (b: MdBlock, i: number): React.ReactNode => {
+    switch (b.kind) {
+      case "heading": {
+        const lv = Math.min(Math.max(b.level ?? 1, 1), 6);
+        return createElement(
+          `h${lv}`,
+          { key: i, className: `md-h md-h${lv}` },
+          renderInline(b.inlines),
+        );
+      }
+      case "paragraph":
+        return <p key={i} className="md-p">{renderInline(b.inlines)}</p>;
+      case "quote":
+        return <blockquote key={i} className="md-quote">{renderInline(b.inlines)}</blockquote>;
+      case "list_item": {
+        const marker =
+          b.checked != null ? (b.checked ? "☑" : "☐") : b.ordered ? `${b.number}.` : "•";
+        return (
+          <div key={i} className="md-li" style={{ paddingLeft: 10 + (b.depth ?? 0) * 22 }}>
+            <span className={`md-marker${b.checked != null ? " task" : ""}`}>{marker}</span>
+            <span className="md-li-body">{renderInline(b.inlines)}</span>
+          </div>
+        );
+      }
+      case "code":
+        return (
+          <pre key={i} className="md-codeblock" data-lang={b.lang || undefined}>
+            <code>{b.raw.replace(/\n$/, "")}</code>
+          </pre>
+        );
+      case "table":
+        return <pre key={i} className="md-raw" data-tag="table">{b.raw.replace(/\n$/, "")}</pre>;
+      case "rule":
+        return <hr key={i} className="md-rule" />;
+      case "html":
+        return <pre key={i} className="md-raw" data-tag="html">{b.raw.replace(/\n$/, "")}</pre>;
+      default:
+        return null;
+    }
+  };
+
   // ---- render-time helpers for the Studio panels ----
   const baseName = (p: string) => p.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || p;
 
@@ -1883,6 +1990,7 @@ function App() {
       ...(meta ? [{ label: "Save", hint: combo("S"), kind: C, run: () => void handleSave() }] : []),
       ...(meta ? [{ label: "Find in file…", hint: combo("F"), kind: C, run: () => openFind(false) }] : []),
       ...(meta ? [{ label: "Go to line…", hint: combo("G"), kind: C, run: () => { setGotoValue(""); setGotoOpen(true); setTimeout(() => gotoInputRef.current?.focus(), 0); } }] : []),
+      ...(meta && isMarkdown && !readonly ? [{ label: showLive ? "Hide live preview" : "Live preview (Markdown)", kind: C, run: () => setLivePreview((v) => !v) }] : []),
       ...(meta && !readonly ? [{ label: "Format JSON (pretty-print)", kind: C, run: () => void formatJson() }] : []),
       ...(meta ? [{ label: "Filter lines to view…", kind: C, run: () => openFilter() }] : []),
       ...(meta?.path ? [{ label: followOn ? "Stop following file" : "Follow file (tail)", kind: C, run: () => toggleFollow() }] : []),
@@ -2234,6 +2342,15 @@ function App() {
       )}
 
       <div className="workarea">
+      {showLive ? (
+      <div className="mdview" tabIndex={0}>
+        <div className="mdview-inner">
+          {blocks.length
+            ? blocks.map(renderBlock)
+            : <p className="md-empty">This document is empty.</p>}
+        </div>
+      </div>
+      ) : (
       <div
         className="scroller"
         ref={scrollerRef}
@@ -2299,6 +2416,7 @@ function App() {
           </div>
         )}
       </div>
+      )}
       {filterOpen && (
         <div className="filter-view">
           <div className="filter-bar">
@@ -2395,6 +2513,15 @@ function App() {
       </div>
       <aside className="gut gut-r">
         <div className="gut-cap" />
+        <button
+          className={`gut-dot-btn${showLive ? " on" : ""}`}
+          onClick={() => setLivePreview((v) => !v)}
+          disabled={!meta || !isMarkdown || readonly}
+          title={isMarkdown ? "Live preview" : "Live preview (Markdown files only)"}
+        >
+          <span className="gd" />
+          <span className="gd-label">Preview</span>
+        </button>
         <button
           className={`gut-dot-btn${leftPanel === "outline" ? " on" : ""}`}
           onClick={() => {

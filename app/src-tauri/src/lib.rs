@@ -32,6 +32,7 @@ pub fn run() {
             editor::read_range,
             editor::search,
             editor::search_positions,
+            editor::markdown_blocks,
             editor::replace_all,
             editor::list_tabs,
             editor::switch_tab,
