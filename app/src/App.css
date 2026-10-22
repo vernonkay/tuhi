@@ -784,10 +784,14 @@ html, body, #root {
 /* ---- Live Markdown preview (feature 3) ---- */
 .mdview { flex: 1; min-height: 0; overflow-y: auto; background: var(--paper); }
 .mdview-inner {
-  max-width: 760px; margin: 0 auto; padding: 32px 40px 80px;
+  max-width: 760px; margin: 0 auto; position: relative;
   font-family: var(--ui-font); color: var(--ink); font-size: 15px; line-height: 1.65;
 }
-.md-empty { color: var(--slate); font-style: italic; }
+/* One virtualized row per block. `flow-root` contains the block's vertical margins so the
+   measured row height includes its spacing (no overlap/gaps); horizontal padding sets the
+   text column. Vertical breathing room is the virtualizer's paddingStart/paddingEnd. */
+.md-vrow { display: flow-root; padding: 0 40px; }
+.md-empty { color: var(--slate); font-style: italic; padding: 32px 40px; }
 .md-h {
   font-family: var(--ui-font); font-weight: 700; line-height: 1.25;
   letter-spacing: -0.01em; margin: 1.4em 0 0.5em; color: var(--ink); text-wrap: balance;
@@ -868,12 +872,3 @@ html, body, #root {
   margin-top: 4px; font-family: var(--ui-font); font-size: 11px; color: var(--slate);
 }
 .md-blockedit-hint b { font-weight: 600; color: var(--ink); }
-
-/* Shown when a document has too many blocks to preview as one DOM tree. */
-.md-toobig { color: var(--slate); font-family: var(--ui-font); padding: 8px 0 24px; }
-.md-toobig p { margin: 0 0 14px; max-width: 48ch; }
-.md-toobig-btn {
-  font: inherit; color: var(--coral); background: var(--coral-soft);
-  border: 1px solid var(--coral); border-radius: 6px; padding: 6px 14px; cursor: pointer;
-}
-.md-toobig-btn:hover { background: var(--coral); color: var(--paper); }

@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { readText, writeText } from "@tauri-apps/plugin-clipboard-manager";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import "./App.css";
 
 /** Mirror of the Rust `DocumentMeta` (editor/mod.rs). */
@@ -240,20 +241,13 @@ const GUTTER = 64; // `.gutter` border-box width; its 12px padding-right sits IN
 // via `request_highlight` instead, and the outline built on open is kept as-is.
 const HIGHLIGHT_MAX_CHARS = 2 * 1024 * 1024;
 
-// Cap on the live Markdown preview, in characters. The preview renders every block as
-// a DOM node eagerly (no virtualization yet), so a very large document — a 4 MB Notion
-// export is ~170k lines / tens of thousands of blocks — would build an enormous DOM and
-// re-parse + re-render the lot on every edit, stalling scroll and typing. Above the cap
-// a Markdown file opens in the normal windowed source editor (which streams fine at any
-// size) and the preview toggle is disabled. Lifting this needs a virtualized preview.
-const MD_PREVIEW_MAX_CHARS = 512 * 1024;
-
-// A second, finer guard: even under the char cap the preview builds one DOM node per
-// block up front, so a block-dense document (heading- or list-heavy) can create several
-// thousand nodes and stall the WebView's layout. Above this many blocks the preview
-// shows a notice and offers source instead of building the tree. The proper fix that
-// lifts this is a virtualized preview (render only the visible blocks) — see the roadmap.
-const MD_PREVIEW_MAX_BLOCKS = 2500;
+// Ceiling on the live Markdown preview, in characters. The preview itself is virtualized
+// (only on-screen blocks become DOM nodes), so block count no longer bounds it. What
+// remains is the one-time cost of parsing the whole document and transferring every block
+// across the Rust→JS boundary, which grows with size; above this a Markdown file opens in
+// the normal windowed source editor instead. (Lifting even this needs windowed parsing —
+// see the roadmap.) 5 MB comfortably covers large real documents, e.g. a 4 MB export.
+const MD_PREVIEW_MAX_CHARS = 5 * 1024 * 1024;
 
 /** Platform-appropriate shortcut label: "⌘O" on macOS, "Ctrl+O" elsewhere. */
 const IS_MAC =
@@ -357,10 +351,6 @@ function App() {
   const [editSource, setEditSource] = useState(false);
   const [blocks, setBlocks] = useState<MdBlock[]>([]);
   const [blocksLoading, setBlocksLoading] = useState(false);
-  // Set when a document parses to more than MD_PREVIEW_MAX_BLOCKS blocks: the preview
-  // shows a notice instead of rendering the (huge) tree, so the WebView never stalls.
-  const [previewBlocked, setPreviewBlocked] = useState(false);
-  const [previewBlockCount, setPreviewBlockCount] = useState(0);
   // Edit-in-place: the index of the block currently open as raw source (or null).
   // The ref mirrors it so blur/commit handlers read a synchronous value, and the
   // skip flag lets Esc cancel without the imminent blur committing.
@@ -423,16 +413,7 @@ function App() {
     // re-parse doesn't flash; the loading flag suppresses the "empty" message meanwhile.
     setBlocksLoading(true);
     try {
-      const result = await invoke<MdBlock[]>("markdown_blocks");
-      if (result.length > MD_PREVIEW_MAX_BLOCKS) {
-        // Too many blocks to render as one DOM tree: show a notice, never build it.
-        setPreviewBlockCount(result.length);
-        setPreviewBlocked(true);
-        setBlocks([]);
-      } else {
-        setPreviewBlocked(false);
-        setBlocks(result);
-      }
+      setBlocks(await invoke<MdBlock[]>("markdown_blocks"));
     } catch (e) {
       setError(String(e));
       setBlocks([]);
@@ -648,6 +629,21 @@ function App() {
   // not scale).
   const showLive = !editSource && !!meta && mdPreviewable;
 
+  // Virtualize the preview: only the blocks on screen become DOM nodes, so the preview
+  // scales to any block count (the char cap bounds parse/transfer cost, not render). Rows
+  // have variable, dynamic heights (an opened block editor is taller), so each row is
+  // measured; `display: flow-root` on the row (CSS) contains the block's margins into the
+  // measured height. paddingStart/End give the top/bottom breathing room.
+  const mdScrollRef = useRef<HTMLDivElement>(null);
+  const mdVirtualizer = useVirtualizer({
+    count: showLive ? blocks.length : 0,
+    getScrollElement: () => mdScrollRef.current,
+    estimateSize: () => 36,
+    overscan: 10,
+    paddingStart: 32,
+    paddingEnd: 80,
+  });
+
   useEffect(() => {
     const measure = () => {
       if (!measureRef.current) return;
@@ -787,7 +783,6 @@ function App() {
     setEditBlock(null);
     editBlockRef.current = null;
     setBlocks([]);
-    setPreviewBlocked(false);
   }, [showLive, activeTabId, meta?.path]);
 
   const ensureCaretVisible = useCallback((line: number) => {
@@ -2533,26 +2528,40 @@ function App() {
 
       <div className="workarea">
       {showLive ? (
-      <div className={`mdview${editBlock != null ? " editing" : ""}`} tabIndex={0}>
-        <div className="mdview-inner" onClick={onPreviewClick}>
-          {previewBlocked ? (
-            <div className="md-toobig">
-              <p>
-                This document is {previewBlockCount.toLocaleString()} blocks — too many to
-                preview smoothly yet. You can edit it as raw Markdown instead.
-              </p>
-              <button className="md-toobig-btn" onClick={() => setEditSource(true)}>
-                Edit as source
-              </button>
-            </div>
-          ) : blocks.length ? (
-            blocks.map(renderBlockEditable)
-          ) : blocksLoading ? (
-            <p className="md-empty">Rendering…</p>
-          ) : (
-            <p className="md-empty">This document is empty.</p>
-          )}
-        </div>
+      <div className={`mdview${editBlock != null ? " editing" : ""}`} ref={mdScrollRef} tabIndex={0}>
+        {blocks.length ? (
+          <div
+            className="mdview-inner"
+            onClick={onPreviewClick}
+            style={{ height: mdVirtualizer.getTotalSize(), position: "relative" }}
+          >
+            {mdVirtualizer.getVirtualItems().map((vi) => (
+              <div
+                key={vi.key}
+                data-index={vi.index}
+                ref={mdVirtualizer.measureElement}
+                className="md-vrow"
+                style={{
+                  position: "absolute",
+                  top: 0,
+                  left: 0,
+                  right: 0,
+                  transform: `translateY(${vi.start}px)`,
+                }}
+              >
+                {renderBlockEditable(blocks[vi.index], vi.index)}
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div className="mdview-inner">
+            {blocksLoading ? (
+              <p className="md-empty">Rendering…</p>
+            ) : (
+              <p className="md-empty">This document is empty.</p>
+            )}
+          </div>
+        )}
       </div>
       ) : (
       <div
