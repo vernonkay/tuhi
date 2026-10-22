@@ -11,6 +11,10 @@ Notepad++ rebuilt portable and modern, without becoming an IDE or a knowledge-ba
 - **Huge files, no cliff.** Open and scroll multi-GB logs and data dumps with flat
   memory. Files 25 MB and up use a read-only memory-mapped engine; nothing has to load
   the whole file into the view.
+- **Markdown that edits in place.** A `.md` opens rendered by default; click any block to
+  edit just that block as raw Markdown, then click away and it re-renders — no separate
+  preview pane. Tables, syntax-highlighted code, Mermaid diagrams and KaTeX math, with the
+  source always a keystroke away. Your files stay plain `.md`, no vault or lock-in.
 - **Live filter-to-view.** Type a regex and the document collapses to just the matching
   lines, instantly, over any size, non-destructive.
 - **Follow / tail + highlighters.** Follow a growing file as it's written, with saved
@@ -19,8 +23,10 @@ Notepad++ rebuilt portable and modern, without becoming an IDE or a knowledge-ba
   reflow it with a keystroke.
 - **A real editor underneath.** Tabs, undo/redo, find & replace (regex), syntax
   highlighting, a file tree, a collapsible outline, a command palette, session restore.
-- **Safe by default.** Atomic save (a failed write can't destroy your file), encoding
-  detection (UTF-8/BOM, UTF-16, Latin-1), a restrictive Content-Security-Policy.
+- **Safe by default.** Crash-safe: unsaved changes are journalled as you type and offered
+  back if the app is killed. Atomic save (a failed write can't destroy your file),
+  encoding detection (UTF-8/BOM, UTF-16, Latin-1), and an "open as text?" guard so a
+  binary file never renders as garbage.
 
 ## Demo
 
@@ -63,9 +69,10 @@ No `just`? The recipes just wrap `npm` in `app/` (`cd app && npm install`, then
 
 ## Status & roadmap
 
-0.1.0 is the first public release. What's next (Markdown mode, viewport highlighting,
-editable large files, and more) is on the [public roadmap board][board] and in
-[`ROADMAP.md`](ROADMAP.md). Ideas and bugs are very welcome, come to
+Working toward a 1.0 worth marketing: large-file handling, Markdown mode (preview,
+edit-in-place, tables/code/Mermaid/KaTeX) and crash-safe editing are in. What's left
+(signed/notarised builds, editable large files, final polish) is on the [public roadmap
+board][board] and in [`ROADMAP.md`](ROADMAP.md). Ideas and bugs are very welcome, come to
 [Discussions][discussions] for ideas and questions, or open an [issue][issues].
 
 [board]: https://github.com/users/vernonkay/projects/1

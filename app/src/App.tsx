@@ -1317,6 +1317,17 @@ function App() {
 
   const jumpToLine = useCallback(
     async (line: number) => {
+      // In the live preview the source scroller isn't mounted, so scroll the virtualized
+      // preview to the block that owns this line (the last block starting at/before it).
+      if (showLive) {
+        let idx = -1;
+        for (let k = 0; k < blocks.length; k++) {
+          if (blocks[k].start_line <= line) idx = k;
+          else break;
+        }
+        if (idx >= 0) mdVirtualizer.scrollToIndex(idx, { align: "start" });
+        return;
+      }
       try {
         const idx = await invoke<number>("pos_to_char", { line, col: 0 });
         await setCaretFromIdx(idx);
@@ -1325,7 +1336,7 @@ function App() {
         setError(String(e));
       }
     },
-    [setCaretFromIdx],
+    [showLive, blocks, mdVirtualizer, setCaretFromIdx],
   );
 
   // The outline as a nested tree, and a sensible default expansion: small files open
