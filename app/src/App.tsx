@@ -2970,11 +2970,12 @@ function App() {
           </div>
         ) : (
           <div className="empty">
-            <p className="empty-tag">A fast, open place to write.</p>
+            <Mark size={44} />
+            <p className="empty-word">tuhi<span className="empty-dot">.</span></p>
+            <p className="empty-tag">A fast, calm place to write.</p>
             <p className="hint">
-              Open a file with <b>Ctrl+O</b>, or pick one from the file tree. tuhi
-              fetches only the lines on screen from a Rust buffer, so large files open
-              and scroll without loading into the view.
+              Open a file with <b>{combo("O")}</b>, or press <b>{combo("P")}</b> for
+              everything. Large files open and scroll without ever loading into the view.
             </p>
           </div>
         )}

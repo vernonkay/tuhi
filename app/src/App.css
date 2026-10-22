@@ -8,8 +8,9 @@
   --slate: #57606a;
   --border: #e6e2d8;
   --coral-soft: rgba(242, 80, 43, 0.1);
-  --ui-font: Inter, "Segoe UI", system-ui, Arial, sans-serif;
-  --mono-font: "JetBrains Mono", "Cascadia Code", ui-monospace, Consolas, monospace;
+  --ui-font: "Inter Variable", Inter, "Segoe UI", system-ui, Arial, sans-serif;
+  --mono-font: "JetBrains Mono Variable", "JetBrains Mono", "Cascadia Code", ui-monospace, Consolas, monospace;
+  --display-font: "Bricolage Grotesque Variable", "Bricolage Grotesque", var(--ui-font);
 
   color: var(--ink);
   background: var(--panel);
@@ -587,6 +588,7 @@ html, body, #root {
   color: var(--ink);
   line-height: 1;
 }
+.empty-dot { color: var(--coral); }
 .empty-tag { font-size: 16px; margin-top: 6px; color: var(--slate); }
 .empty .hint { font-size: 13px; max-width: 44ch; margin: 18px auto 0; }
 
@@ -793,9 +795,11 @@ html, body, #root {
 .md-vrow { display: flow-root; padding: 0 40px; }
 .md-empty { color: var(--slate); font-style: italic; padding: 32px 40px; }
 .md-h {
-  font-family: var(--ui-font); font-weight: 700; line-height: 1.25;
-  letter-spacing: -0.01em; margin: 1.4em 0 0.5em; color: var(--ink); text-wrap: balance;
+  font-family: var(--display-font); font-weight: 700; line-height: 1.2;
+  letter-spacing: -0.015em; margin: 1.4em 0 0.5em; color: var(--ink); text-wrap: balance;
 }
+/* The small label-like headings read better in the UI face than in display type. */
+.md-h5, .md-h6 { font-family: var(--ui-font); }
 .md-h:first-child { margin-top: 0; }
 .md-h1 { font-size: 2em; padding-bottom: 0.2em; border-bottom: 1px solid var(--border); }
 .md-h2 { font-size: 1.5em; padding-bottom: 0.15em; border-bottom: 1px solid var(--border); }
@@ -869,6 +873,34 @@ html, body, #root {
 
 /* KaTeX math. Inline math flows with the text; display math centres as its own line. */
 .md-math-display { display: block; margin: 0.7em 0; text-align: center; overflow-x: auto; overflow-y: hidden; }
+
+/* ---- polish: scrollbars + micro-interactions ---- */
+/* Thin, palette-matched scrollbars instead of the default chunky WebView2 bars. */
+::-webkit-scrollbar { width: 11px; height: 11px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: var(--border); border-radius: 7px;
+  border: 3px solid transparent; background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover { background: var(--slate); background-clip: padding-box; }
+::-webkit-scrollbar-corner { background: transparent; }
+
+/* Subtle transitions so state changes feel considered, not abrupt. */
+button,
+.gut-dot-btn,
+.ft-row,
+.ft-recent-row,
+.op-row,
+.hl-row,
+.tab-close,
+.tab-dot {
+  transition: background-color 0.12s ease, color 0.12s ease, border-color 0.12s ease, opacity 0.12s ease;
+}
+
+/* Gentle fade entering the preview and opening a block for editing. */
+@keyframes tuhi-fade-in { from { opacity: 0; } to { opacity: 1; } }
+.mdview-inner { animation: tuhi-fade-in 0.14s ease; }
+.md-blockedit { animation: tuhi-fade-in 0.1s ease; }
 .md-raw {
   font-family: var(--mono-font); font-size: 0.84em; background: var(--panel);
   border: 1px dashed var(--border); border-radius: 8px; padding: 18px 14px 12px;
