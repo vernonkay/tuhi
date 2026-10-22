@@ -1026,39 +1026,68 @@ impl Buffer for RopeBuffer {
 
 // Tauri commands — thin delegations to the active buffer behind the mutex.
 
+/// Open a file as a new tab (or switch to it if already open).
+///
+/// `async` with the heavy work on a blocking worker: reading the file, decoding it,
+/// building the rope and the initial whole-document highlight are all CPU/IO bound, and
+/// for a file under the highlight cap the syntect parse is the slow part. Done
+/// synchronously on the UI thread it froze the window ("not responding") while several
+/// large files were opened one after another — the same lesson as `request_highlight`.
+/// The new buffer is built off any lock (it isn't in the registry yet), and the lock is
+/// taken only for the fast existing-tab check and the final insert.
 #[tauri::command]
-pub fn open_document(
+pub async fn open_document(
     path: String,
     dark: bool,
-    state: State<EditorState>,
+    state: State<'_, EditorState>,
 ) -> Result<TabsState, EditorError> {
-    let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-    let mut reg = state.0.lock().map_err(|_| EditorError::LockPoisoned)?;
-
     // If this file is already open, switch to its tab instead of duplicating it.
-    let existing = reg
+    {
+        let mut reg = state.0.lock().map_err(|_| EditorError::LockPoisoned)?;
+        if let Some(id) = reg
+            .tabs
+            .iter()
+            .find(|t| t.path.as_deref() == Some(path.as_str()))
+            .map(|t| t.id)
+        {
+            reg.active = Some(id);
+            return Ok(reg.tabs_state());
+        }
+    }
+
+    // Pick the engine by file size and build the buffer off the UI thread: large files
+    // open read-only on the mmap engine (instant, flat memory), smaller files on the
+    // editable `RopeBuffer`. `dark` selects the highlight theme for the colour scheme.
+    let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+    let open_path = path.clone();
+    let buffer: Box<dyn Buffer> =
+        tauri::async_runtime::spawn_blocking(move || -> Result<Box<dyn Buffer>, EditorError> {
+            let mut buffer: Box<dyn Buffer> = if size >= mmapbuf::MMAP_THRESHOLD_BYTES {
+                Box::new(mmapbuf::MmapBuffer::default())
+            } else {
+                Box::new(RopeBuffer {
+                    dark,
+                    ..Default::default()
+                })
+            };
+            buffer.open(&open_path)?;
+            Ok(buffer)
+        })
+        .await
+        .map_err(|e| EditorError::Other(format!("open task failed: {e}")))??;
+
+    let mut reg = state.0.lock().map_err(|_| EditorError::LockPoisoned)?;
+    // A concurrent open of the same path may have won the race while we built ours;
+    // if so, drop this buffer and switch to the existing tab.
+    if let Some(id) = reg
         .tabs
         .iter()
         .find(|t| t.path.as_deref() == Some(path.as_str()))
-        .map(|t| t.id);
-    if let Some(id) = existing {
+        .map(|t| t.id)
+    {
         reg.active = Some(id);
         return Ok(reg.tabs_state());
     }
-
-    // Pick the engine by file size: large files open read-only on the mmap engine
-    // (instant, flat memory), smaller files on the editable `RopeBuffer`. `dark`
-    // selects the highlight theme for the current colour scheme.
-    let mut buffer: Box<dyn Buffer> = if size >= mmapbuf::MMAP_THRESHOLD_BYTES {
-        Box::new(mmapbuf::MmapBuffer::default())
-    } else {
-        Box::new(RopeBuffer {
-            dark,
-            ..Default::default()
-        })
-    };
-    buffer.open(&path)?;
-
     let id = reg.next_id;
     reg.next_id += 1;
     reg.tabs.push(Tab {

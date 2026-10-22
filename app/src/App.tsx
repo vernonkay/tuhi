@@ -981,12 +981,17 @@ function App() {
     setBusy(true);
     try {
       const dark = darkRef.current;
-      // Open each file as its own tab; the last one ends up active.
-      let last: TabsState | null = null;
-      for (const p of paths) {
-        last = await invoke<TabsState>("open_document", { path: p, dark });
+      // Open each file as its own tab. `open_document` is async (it builds the buffer on
+      // a worker thread), so open all but the last in parallel — their highlights run on
+      // separate threads, cutting the wall-clock of a multi-file open and keeping the UI
+      // responsive — then open the last one so it ends up active.
+      if (paths.length > 1) {
+        await Promise.all(
+          paths.slice(0, -1).map((p) => invoke<TabsState>("open_document", { path: p, dark })),
+        );
       }
-      if (last) await applyTabsState(last);
+      const last = await invoke<TabsState>("open_document", { path: paths[paths.length - 1], dark });
+      await applyTabsState(last);
       void revealInTree(paths[paths.length - 1]);
       paths.forEach((p) => remember(p, "file"));
     } catch (e) {
