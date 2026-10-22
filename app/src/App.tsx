@@ -1251,6 +1251,37 @@ function App() {
     [applyTabsState, revealInTree, remember],
   );
 
+  // Open the welcome guide (first run, and the palette command). The guide is written to
+  // the app-data dir by `ensure_welcome` if missing, then opened as a normal editable doc.
+  const openWelcome = useCallback(async () => {
+    try {
+      const path = await invoke<string>("ensure_welcome");
+      await applyTabsState(await invoke<TabsState>("open_document", { path, dark: darkRef.current }));
+      remember(path, "file");
+    } catch (e) {
+      setError(String(e));
+    }
+  }, [applyTabsState, remember]);
+
+  // First run only: open the welcome guide, unless there's a session to restore. Marks
+  // itself done in localStorage so it never fires again.
+  useEffect(() => {
+    let welcomed = true;
+    try {
+      welcomed = localStorage.getItem("tuhi.welcomedV1") === "1";
+    } catch {
+      /* if storage is unavailable, do nothing */
+    }
+    if (welcomed) return;
+    try {
+      localStorage.setItem("tuhi.welcomedV1", "1");
+    } catch {
+      /* best effort */
+    }
+    if (savedSession.files.length === 0) void openWelcome();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // Open a folder by path: list it, pin it as the tree root, remember it.
   const openFolderAt = useCallback(
     async (path: string) => {
@@ -2468,6 +2499,7 @@ function App() {
       ...(meta?.path ? [{ label: followOn ? "Stop following file" : "Follow file (tail)", kind: C, run: () => toggleFollow() }] : []),
       { label: "Edit highlighters…", kind: C, run: () => { setHlFromSettings(false); setHlEditorOpen(true); } },
       { label: "Settings…", kind: C, run: () => setSettingsOpen(true) },
+      { label: "Open the welcome guide", kind: C, run: () => void openWelcome() },
       { label: "Show files", kind: C, run: () => setLeftPanel((v) => (v === "files" ? null : "files")) },
       ...(meta ? [{ label: "Show outline", kind: C, run: () => setLeftPanel((v) => (v === "outline" ? null : "outline")) }] : []),
       ...tabs.map((t) => ({ label: t.name, kind: "tab" as const, run: () => void switchTab(t.id) })),
