@@ -79,9 +79,9 @@ Not features so much as the things a public 1.0 needs on the day:
   verbs and Markdown mode; re-record once the feature set is frozen.
 - **A landing page** — a static product page (what tuhi is, the GIF, per-OS download
   links, the GitHub link), built from the README content and brand palette. Host it free
-  on **Cloudflare Pages at `tuhi.pages.dev`** for launch; a custom domain (`tuhi.dev` /
-  `tuhi.nz`, ~US$10/yr) waits until there's community traction — switching is just a DNS
-  change, no rebuild.
+  on **Cloudflare Pages at `tuhi-editor.pages.dev`** for launch (`tuhi.pages.dev` was
+  already taken); a custom domain (`tuhi.dev` / `tuhi.nz`, ~US$10/yr) waits until there's
+  community traction — switching is just a DNS change, no rebuild. (Live now.)
 
 ## Planned / under consideration
 
