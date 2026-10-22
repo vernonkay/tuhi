@@ -5,6 +5,7 @@ import { ask, open as openDialog, save as saveDialog } from "@tauri-apps/plugin-
 import { readText, writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import hljs from "highlight.js/lib/common";
+import mermaid from "mermaid";
 import "./App.css";
 
 /** Mirror of the Rust `DocumentMeta` (editor/mod.rs). */
@@ -324,6 +325,51 @@ async function shouldOpenAsText(path: string): Promise<boolean> {
   return true;
 }
 
+/** Render a ```mermaid fence as a diagram. Mermaid renders asynchronously to an SVG, so
+ *  the block shows a quiet placeholder while rendering and falls back to the raw code on a
+ *  parse error. Re-renders when the code or the theme changes. */
+function MermaidBlock({ code, dark }: { code: string; dark: boolean }) {
+  const [svg, setSvg] = useState<string | null>(null);
+  const [failed, setFailed] = useState(false);
+  useEffect(() => {
+    let alive = true;
+    setSvg(null);
+    setFailed(false);
+    try {
+      mermaid.initialize({
+        startOnLoad: false,
+        securityLevel: "strict",
+        theme: dark ? "dark" : "default",
+      });
+    } catch {
+      /* initialize is idempotent; ignore */
+    }
+    const id = "mmd-" + Math.random().toString(36).slice(2, 10);
+    mermaid
+      .render(id, code)
+      .then((r) => {
+        if (alive) setSvg(r.svg);
+      })
+      .catch(() => {
+        if (alive) setFailed(true);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [code, dark]);
+  if (failed) {
+    return (
+      <pre className="md-codeblock" data-lang="mermaid">
+        <code>{code}</code>
+      </pre>
+    );
+  }
+  if (svg == null) {
+    return <div className="md-mermaid md-mermaid-pending">rendering diagram…</div>;
+  }
+  return <div className="md-mermaid" dangerouslySetInnerHTML={{ __html: svg }} />;
+}
+
 /** The caret-over-a-line brand mark (docs/brand.md). Coral caret, ink line. */
 function Mark({ size = 20 }: { size?: number }) {
   return (
@@ -459,6 +505,9 @@ function App() {
     }
     return "auto";
   });
+  // Reactive resolved dark mode (the theme effect also keeps `darkRef`); used by rendered
+  // content that must restyle on theme change, e.g. Mermaid diagrams.
+  const [isDark, setIsDark] = useState(false);
 
   // Close the highlighter rules editor, returning to Settings if it opened from there
   // (it's a modal reached from within Settings, not a sibling of the editor).
@@ -757,6 +806,7 @@ function App() {
     const apply = () => {
       const dark = theme === "dark" ? true : theme === "light" ? false : mq.matches;
       darkRef.current = dark;
+      setIsDark(dark);
       document.documentElement.dataset.theme = dark ? "dark" : "light";
       try {
         localStorage.setItem("tuhi.theme", theme);
@@ -2210,6 +2260,14 @@ function App() {
       }
       case "code": {
         const code = b.raw.replace(/\n$/, "");
+        // A ```mermaid fence renders as a diagram (wrapped so click-to-edit still tags it).
+        if (b.lang === "mermaid") {
+          return (
+            <div key={i} className="md-mermaid-wrap">
+              <MermaidBlock code={code} dark={isDark} />
+            </div>
+          );
+        }
         // Highlight only when the language is known (no expensive auto-detect); fall back
         // to plain, escaped text otherwise. hljs output is sanitized token markup.
         let html: string | null = null;

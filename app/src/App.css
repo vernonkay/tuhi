@@ -860,6 +860,12 @@ html, body, #root {
 }
 .md-table thead th { background: var(--panel); font-weight: 600; color: var(--ink); }
 .md-table tbody tr:nth-child(even) td { background: var(--panel); }
+
+/* Mermaid diagrams. */
+.md-mermaid-wrap { margin: 0 0 0.9em; }
+.md-mermaid { display: flex; justify-content: center; overflow-x: auto; }
+.md-mermaid svg { max-width: 100%; height: auto; }
+.md-mermaid-pending { color: var(--slate); font-style: italic; font-size: 13px; padding: 14px; justify-content: flex-start; }
 .md-raw {
   font-family: var(--mono-font); font-size: 0.84em; background: var(--panel);
   border: 1px dashed var(--border); border-radius: 8px; padding: 18px 14px 12px;
