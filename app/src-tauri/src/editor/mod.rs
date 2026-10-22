@@ -404,6 +404,15 @@ impl Default for RopeBuffer {
     }
 }
 
+/// Markdown file extensions. Markdown is deliberately NOT syntax-highlighted: its rich
+/// view is the live preview, and syntect's markdown grammar is pathologically slow on
+/// code-heavy documents (a 0.5–1 MB `.md` with fenced code blocks takes 10–20s to
+/// highlight — see the open-time investigation), which is pure waste when the preview
+/// renders blocks rather than highlighted source. Source mode shows plain Markdown.
+fn is_markdown_ext(ext: &str) -> bool {
+    matches!(ext, "md" | "markdown" | "mdown" | "mkd" | "markdn" | "mdx")
+}
+
 impl RopeBuffer {
     fn make_meta(&self) -> DocumentMeta {
         DocumentMeta {
@@ -771,7 +780,10 @@ impl Buffer for RopeBuffer {
     /// enough and has a known file type; otherwise leave it plain. Called on open,
     /// after replace-all, and (debounced from the UI) after edits settle.
     fn rehighlight(&mut self) {
-        if self.rope.len_bytes() <= HIGHLIGHT_MAX_BYTES && !self.ext.is_empty() {
+        if self.rope.len_bytes() <= HIGHLIGHT_MAX_BYTES
+            && !self.ext.is_empty()
+            && !is_markdown_ext(&self.ext)
+        {
             let text = self.rope.to_string();
             self.highlights =
                 highlight::highlight_doc(&text, &self.ext, self.dark).unwrap_or_default();
@@ -788,8 +800,11 @@ impl Buffer for RopeBuffer {
 
     fn take_hl_job(&mut self) -> Option<HlJob> {
         // Over-cap, known-type files only; under-cap and plain files use `highlights`,
-        // and an empty extension has nothing to detect a syntax from.
-        let over_cap = self.rope.len_bytes() > HIGHLIGHT_MAX_BYTES && !self.ext.is_empty();
+        // and an empty extension has nothing to detect a syntax from. Markdown is never
+        // highlighted (see `is_markdown_ext`), so it takes no viewport-highlight job either.
+        let over_cap = self.rope.len_bytes() > HIGHLIGHT_MAX_BYTES
+            && !self.ext.is_empty()
+            && !is_markdown_ext(&self.ext);
         if !over_cap {
             return None;
         }
@@ -1623,6 +1638,34 @@ mod tests {
         b.insert(0, "# Title\n\nlast").unwrap(); // no trailing newline
         b.replace_line_range(2, 3, "edited last").unwrap();
         assert_eq!(b.text(), "# Title\n\nedited last");
+    }
+
+    #[test]
+    fn markdown_is_not_syntax_highlighted() {
+        // Markdown is rendered in the preview, not highlighted as source, so it produces
+        // no highlight spans and takes no viewport-highlight job — this is what keeps
+        // opening a Markdown file fast (syntect's md grammar is pathologically slow).
+        let mut md = RopeBuffer {
+            ext: "md".into(),
+            ..Default::default()
+        };
+        md.insert(0, "# Heading\n\nSome **bold** text with `code`.\n")
+            .unwrap();
+        md.rehighlight();
+        assert!(md.highlights.is_empty(), "markdown must not be highlighted");
+        assert!(
+            md.take_hl_job().is_none(),
+            "markdown takes no viewport-highlight job"
+        );
+
+        // A code file is still highlighted (control), so the skip is markdown-specific.
+        let mut rs = RopeBuffer {
+            ext: "rs".into(),
+            ..Default::default()
+        };
+        rs.insert(0, "fn main() { let x = 1; }\n").unwrap();
+        rs.rehighlight();
+        assert!(!rs.highlights.is_empty(), "code must still be highlighted");
     }
 
     #[test]
