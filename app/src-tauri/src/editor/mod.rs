@@ -208,6 +208,19 @@ pub trait Buffer: Send {
     fn replace_document(&mut self, _text: &str) -> Result<DocumentMeta, EditorError> {
         Err(EditorError::ReadOnly)
     }
+    /// Replace the source line range `[start_line, end_line)` with `text`, in one
+    /// undoable step. Backs the edit-in-place hybrid: a rendered Markdown block is
+    /// swapped to its raw source, edited, and written back by its line span. The
+    /// replacement's trailing newline is normalized to match the range's, so block
+    /// separation is preserved. Read-only engines refuse.
+    fn replace_line_range(
+        &mut self,
+        _start_line: usize,
+        _end_line: usize,
+        _text: &str,
+    ) -> Result<DocumentMeta, EditorError> {
+        Err(EditorError::ReadOnly)
+    }
     /// Lines matching `query` (as a regex), for the non-destructive filter view.
     /// Capped at [`MAX_FILTER_MATCHES`]. Default: no matches.
     fn filter(
@@ -389,6 +402,15 @@ impl Default for RopeBuffer {
             redo_stack: Vec::new(),
         }
     }
+}
+
+/// Markdown file extensions. Markdown is deliberately NOT syntax-highlighted: its rich
+/// view is the live preview, and syntect's markdown grammar is pathologically slow on
+/// code-heavy documents (a 0.5–1 MB `.md` with fenced code blocks takes 10–20s to
+/// highlight — see the open-time investigation), which is pure waste when the preview
+/// renders blocks rather than highlighted source. Source mode shows plain Markdown.
+fn is_markdown_ext(ext: &str) -> bool {
+    matches!(ext, "md" | "markdown" | "mdown" | "mkd" | "markdn" | "mdx")
 }
 
 impl RopeBuffer {
@@ -758,7 +780,10 @@ impl Buffer for RopeBuffer {
     /// enough and has a known file type; otherwise leave it plain. Called on open,
     /// after replace-all, and (debounced from the UI) after edits settle.
     fn rehighlight(&mut self) {
-        if self.rope.len_bytes() <= HIGHLIGHT_MAX_BYTES && !self.ext.is_empty() {
+        if self.rope.len_bytes() <= HIGHLIGHT_MAX_BYTES
+            && !self.ext.is_empty()
+            && !is_markdown_ext(&self.ext)
+        {
             let text = self.rope.to_string();
             self.highlights =
                 highlight::highlight_doc(&text, &self.ext, self.dark).unwrap_or_default();
@@ -774,10 +799,17 @@ impl Buffer for RopeBuffer {
     }
 
     fn take_hl_job(&mut self) -> Option<HlJob> {
-        // Over-cap, known-type files only; under-cap and plain files use `highlights`,
-        // and an empty extension has nothing to detect a syntax from.
-        let over_cap = self.rope.len_bytes() > HIGHLIGHT_MAX_BYTES && !self.ext.is_empty();
-        if !over_cap {
+        // A viewport-highlight job is produced for two cases: an over-cap file (not
+        // whole-document highlighted, so its visible window is coloured on demand) and
+        // Markdown at ANY size. Markdown is never whole-document highlighted (syntect's md
+        // grammar is far too slow — see `is_markdown_ext`), so its SOURCE view is coloured
+        // lazily, one visible window at a time, off the UI thread. An empty extension has
+        // no syntax to detect.
+        if self.ext.is_empty() {
+            return None;
+        }
+        let wants_job = is_markdown_ext(&self.ext) || self.rope.len_bytes() > HIGHLIGHT_MAX_BYTES;
+        if !wants_job {
             return None;
         }
         Some(HlJob {
@@ -924,6 +956,57 @@ impl Buffer for RopeBuffer {
         Ok(self.make_meta())
     }
 
+    fn replace_line_range(
+        &mut self,
+        start_line: usize,
+        end_line: usize,
+        text: &str,
+    ) -> Result<DocumentMeta, EditorError> {
+        let total_lines = self.rope.len_lines();
+        let n = self.rope.len_chars();
+        // Line starts in char space; a line index past the end maps to the doc end,
+        // so the final block (whose `end_line` is one past the last line) is covered.
+        let start = if start_line >= total_lines {
+            n
+        } else {
+            self.rope.line_to_char(start_line)
+        };
+        let end = if end_line >= total_lines {
+            n
+        } else {
+            self.rope.line_to_char(end_line)
+        };
+        if start > end {
+            return Err(EditorError::InvalidRange { start, end });
+        }
+        // Normalize the terminating newline to match the range being replaced, so the
+        // block stays separated from the next (or stays unterminated at end-of-file).
+        // Internal newlines in `text` are untouched, so an edit may split one block
+        // into several; the next parse re-derives the spans.
+        let orig_ends_nl = end > start && self.rope.char(end - 1) == '\n';
+        let body = text.trim_end_matches('\n');
+        let replacement = if orig_ends_nl {
+            format!("{body}\n")
+        } else {
+            body.to_string()
+        };
+        let removed = self.rope.slice(start..end).to_string();
+        if removed == replacement {
+            return Ok(self.make_meta());
+        }
+        self.rope.remove(start..end);
+        self.rope.insert(start, &replacement);
+        self.dirty = true;
+        self.redo_stack.clear();
+        self.push_undo(Change {
+            at: start,
+            removed,
+            inserted: replacement,
+        });
+        self.rehighlight();
+        Ok(self.make_meta())
+    }
+
     fn filter(
         &self,
         query: &str,
@@ -962,39 +1045,68 @@ impl Buffer for RopeBuffer {
 
 // Tauri commands — thin delegations to the active buffer behind the mutex.
 
+/// Open a file as a new tab (or switch to it if already open).
+///
+/// `async` with the heavy work on a blocking worker: reading the file, decoding it,
+/// building the rope and the initial whole-document highlight are all CPU/IO bound, and
+/// for a file under the highlight cap the syntect parse is the slow part. Done
+/// synchronously on the UI thread it froze the window ("not responding") while several
+/// large files were opened one after another — the same lesson as `request_highlight`.
+/// The new buffer is built off any lock (it isn't in the registry yet), and the lock is
+/// taken only for the fast existing-tab check and the final insert.
 #[tauri::command]
-pub fn open_document(
+pub async fn open_document(
     path: String,
     dark: bool,
-    state: State<EditorState>,
+    state: State<'_, EditorState>,
 ) -> Result<TabsState, EditorError> {
-    let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-    let mut reg = state.0.lock().map_err(|_| EditorError::LockPoisoned)?;
-
     // If this file is already open, switch to its tab instead of duplicating it.
-    let existing = reg
+    {
+        let mut reg = state.0.lock().map_err(|_| EditorError::LockPoisoned)?;
+        if let Some(id) = reg
+            .tabs
+            .iter()
+            .find(|t| t.path.as_deref() == Some(path.as_str()))
+            .map(|t| t.id)
+        {
+            reg.active = Some(id);
+            return Ok(reg.tabs_state());
+        }
+    }
+
+    // Pick the engine by file size and build the buffer off the UI thread: large files
+    // open read-only on the mmap engine (instant, flat memory), smaller files on the
+    // editable `RopeBuffer`. `dark` selects the highlight theme for the colour scheme.
+    let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+    let open_path = path.clone();
+    let buffer: Box<dyn Buffer> =
+        tauri::async_runtime::spawn_blocking(move || -> Result<Box<dyn Buffer>, EditorError> {
+            let mut buffer: Box<dyn Buffer> = if size >= mmapbuf::MMAP_THRESHOLD_BYTES {
+                Box::new(mmapbuf::MmapBuffer::default())
+            } else {
+                Box::new(RopeBuffer {
+                    dark,
+                    ..Default::default()
+                })
+            };
+            buffer.open(&open_path)?;
+            Ok(buffer)
+        })
+        .await
+        .map_err(|e| EditorError::Other(format!("open task failed: {e}")))??;
+
+    let mut reg = state.0.lock().map_err(|_| EditorError::LockPoisoned)?;
+    // A concurrent open of the same path may have won the race while we built ours;
+    // if so, drop this buffer and switch to the existing tab.
+    if let Some(id) = reg
         .tabs
         .iter()
         .find(|t| t.path.as_deref() == Some(path.as_str()))
-        .map(|t| t.id);
-    if let Some(id) = existing {
+        .map(|t| t.id)
+    {
         reg.active = Some(id);
         return Ok(reg.tabs_state());
     }
-
-    // Pick the engine by file size: large files open read-only on the mmap engine
-    // (instant, flat memory), smaller files on the editable `RopeBuffer`. `dark`
-    // selects the highlight theme for the current colour scheme.
-    let mut buffer: Box<dyn Buffer> = if size >= mmapbuf::MMAP_THRESHOLD_BYTES {
-        Box::new(mmapbuf::MmapBuffer::default())
-    } else {
-        Box::new(RopeBuffer {
-            dark,
-            ..Default::default()
-        })
-    };
-    buffer.open(&path)?;
-
     let id = reg.next_id;
     reg.next_id += 1;
     reg.tabs.push(Tab {
@@ -1301,6 +1413,25 @@ pub async fn markdown_blocks(
         .map_err(|e| EditorError::Other(format!("markdown parse failed: {e}")))
 }
 
+/// Write an edited Markdown block back to the buffer by its source line span, in one
+/// undoable step, for the edit-in-place hybrid. `end_line` is exclusive (the block's
+/// `end_line` from `markdown_blocks`). Returns the new document meta so the UI can
+/// refresh and re-parse. Fails on the read-only large-file engine.
+#[tauri::command]
+pub fn replace_block(
+    start_line: usize,
+    end_line: usize,
+    text: String,
+    state: State<EditorState>,
+) -> Result<DocumentMeta, EditorError> {
+    state
+        .0
+        .lock()
+        .map_err(|_| EditorError::LockPoisoned)?
+        .active_buffer_mut()?
+        .replace_line_range(start_line, end_line, &text)
+}
+
 #[derive(Serialize)]
 pub struct ReplaceResult {
     pub meta: DocumentMeta,
@@ -1478,6 +1609,72 @@ mod tests {
         let after_delete = b.delete(0, 1).unwrap();
         assert!(after_delete.dirty);
         assert_eq!(b.viewport(0, 1).unwrap()[0].text, "bc");
+    }
+
+    #[test]
+    fn replace_line_range_rewrites_a_block_and_keeps_separation() {
+        let mut b = RopeBuffer::default();
+        b.insert(0, "# Title\n\nold paragraph.\n\n## End\n")
+            .unwrap();
+        // The paragraph spans line 2 (end exclusive 3). Rewrite it.
+        b.replace_line_range(2, 3, "new paragraph text.").unwrap();
+        assert_eq!(b.text(), "# Title\n\nnew paragraph text.\n\n## End\n");
+        // One undo step restores the whole original document.
+        let caret = b.undo().unwrap();
+        assert!(caret.is_some());
+        assert_eq!(b.text(), "# Title\n\nold paragraph.\n\n## End\n");
+    }
+
+    #[test]
+    fn replace_line_range_can_split_one_block_into_several() {
+        let mut b = RopeBuffer::default();
+        b.insert(0, "para one.\n").unwrap();
+        // Replacing with text that contains a blank line yields two blocks worth of
+        // source; the trailing newline is normalized to the one being replaced.
+        b.replace_line_range(0, 1, "para one.\n\n## A heading")
+            .unwrap();
+        assert_eq!(b.text(), "para one.\n\n## A heading\n");
+    }
+
+    #[test]
+    fn replace_line_range_at_eof_without_newline() {
+        let mut b = RopeBuffer::default();
+        b.insert(0, "# Title\n\nlast").unwrap(); // no trailing newline
+        b.replace_line_range(2, 3, "edited last").unwrap();
+        assert_eq!(b.text(), "# Title\n\nedited last");
+    }
+
+    #[test]
+    fn markdown_is_not_eagerly_highlighted_but_takes_a_viewport_job() {
+        // Markdown is never whole-document highlighted (syntect's md grammar is far too
+        // slow — that was the open-time stall), so `highlights` stays empty. Its source
+        // view is instead coloured lazily per visible window, so it DOES take a
+        // viewport-highlight job.
+        let mut md = RopeBuffer {
+            ext: "md".into(),
+            ..Default::default()
+        };
+        md.insert(0, "# Heading\n\nSome **bold** text with `code`.\n")
+            .unwrap();
+        md.rehighlight();
+        assert!(
+            md.highlights.is_empty(),
+            "markdown must not be eagerly (whole-document) highlighted"
+        );
+        assert!(
+            md.take_hl_job().is_some(),
+            "markdown is coloured lazily, one visible window at a time"
+        );
+
+        // A small code file is still whole-document highlighted (control): the eager skip
+        // is markdown-specific.
+        let mut rs = RopeBuffer {
+            ext: "rs".into(),
+            ..Default::default()
+        };
+        rs.insert(0, "fn main() { let x = 1; }\n").unwrap();
+        rs.rehighlight();
+        assert!(!rs.highlights.is_empty(), "code must still be highlighted");
     }
 
     #[test]

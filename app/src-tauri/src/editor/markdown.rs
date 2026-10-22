@@ -64,6 +64,12 @@ pub struct Block {
     pub inlines: Vec<InlineRun>,
     /// Raw source for blocks not yet rendered rich (code / table / html); else empty.
     pub raw: String,
+    /// The block's exact source lines, verbatim and newline-terminated as in the
+    /// document. The edit-in-place hybrid seeds a block's textarea with this, edits
+    /// it, and writes it back by the line span. Unlike `raw` (a rendering input, e.g.
+    /// a code body without its fences) this is always the literal source slice, and
+    /// is filled uniformly for every block in a post-pass from the line spans.
+    pub source: String,
 }
 
 /// The text block currently being assembled (heading / paragraph / list item / quote).
@@ -90,6 +96,7 @@ pub fn parse_blocks(text: &str) -> Vec<Block> {
             end_line: line_of(p.end_byte.saturating_sub(1)) + 1,
             inlines: p.inlines,
             raw: String::new(),
+            source: String::new(),
         }
     };
 
@@ -235,6 +242,7 @@ pub fn parse_blocks(text: &str) -> Vec<Block> {
                         end_line: line_of(range.end.saturating_sub(1)) + 1,
                         inlines: Vec::new(),
                         raw: code_text.clone(),
+                        source: String::new(),
                     });
                 }
             }
@@ -250,6 +258,7 @@ pub fn parse_blocks(text: &str) -> Vec<Block> {
                         end_line: line_of(range.end.saturating_sub(1)) + 1,
                         inlines: Vec::new(),
                         raw: text[raw_start..range.end].to_string(),
+                        source: String::new(),
                     });
                 }
             }
@@ -260,6 +269,7 @@ pub fn parse_blocks(text: &str) -> Vec<Block> {
                     end_line: line_of(range.end.saturating_sub(1)) + 1,
                     inlines: Vec::new(),
                     raw: String::new(),
+                    source: String::new(),
                 });
             }
             Event::Text(t) => {
@@ -315,6 +325,7 @@ pub fn parse_blocks(text: &str) -> Vec<Block> {
                     end_line: line_of(range.end.saturating_sub(1)) + 1,
                     inlines: Vec::new(),
                     raw: text[range.start..range.end].to_string(),
+                    source: String::new(),
                 });
             }
             Event::End(end @ (TagEnd::Heading(_) | TagEnd::Paragraph | TagEnd::Item)) => {
@@ -335,6 +346,24 @@ pub fn parse_blocks(text: &str) -> Vec<Block> {
                 list_stack.pop();
             }
             _ => {}
+        }
+    }
+
+    // Fill each block's verbatim source slice from its line span, uniformly. Done in
+    // one pass (rather than per constructor) so every block kind carries exact source
+    // for the edit-in-place hybrid, independent of how the block was assembled. The
+    // slice runs from the first line's start to the line after the last (so it ends
+    // with the block's own trailing newline), clamped to the document.
+    let len = text.len();
+    for b in &mut blocks {
+        let start = line_starts
+            .get(b.start_line)
+            .copied()
+            .unwrap_or(len)
+            .min(len);
+        let end = line_starts.get(b.end_line).copied().unwrap_or(len).min(len);
+        if start <= end {
+            b.source = text[start..end].to_string();
         }
     }
 
@@ -521,5 +550,45 @@ mod tests {
     #[test]
     fn empty_document_yields_no_blocks() {
         assert!(parse_blocks("").is_empty());
+    }
+
+    #[test]
+    fn source_is_verbatim_lines_for_every_block() {
+        // Heading, paragraph, and a code fence: source is the exact source lines
+        // (newline-terminated), including a code block's fences (unlike `raw`, which
+        // is the fence-less body used for rendering).
+        let md = "# Title\n\nHello **world**.\n\n```rust\nfn main() {}\n```\n";
+        let b = parse_blocks(md);
+        assert_eq!(b.len(), 3);
+        assert_eq!(b[0].source, "# Title\n");
+        assert_eq!(b[1].source, "Hello **world**.\n");
+        assert_eq!(b[2].source, "```rust\nfn main() {}\n```\n");
+        // Re-splicing each block's source back over its line span reproduces the doc.
+        let lines: Vec<&str> = md.split_inclusive('\n').collect();
+        let mut rebuilt = String::new();
+        let mut cur = 0usize;
+        for blk in &b {
+            // blank separator lines between blocks
+            while cur < blk.start_line {
+                rebuilt.push_str(lines[cur]);
+                cur += 1;
+            }
+            rebuilt.push_str(&blk.source);
+            cur = blk.end_line;
+        }
+        while cur < lines.len() {
+            rebuilt.push_str(lines[cur]);
+            cur += 1;
+        }
+        assert_eq!(rebuilt, md);
+    }
+
+    #[test]
+    fn source_handles_final_line_without_newline() {
+        // A document whose last block has no trailing newline: source carries none.
+        let md = "# Title\n\nlast line no newline";
+        let b = parse_blocks(md);
+        assert_eq!(b.len(), 2);
+        assert_eq!(b[1].source, "last line no newline");
     }
 }
