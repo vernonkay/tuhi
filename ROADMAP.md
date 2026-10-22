@@ -77,6 +77,11 @@ Not features so much as the things a public 1.0 needs on the day:
   It's the first thing a new installer sees.
 - **A fresh demo GIF** — the current one predates the Twin-Gutters chrome, the big-file
   verbs and Markdown mode; re-record once the feature set is frozen.
+- **A landing page** — a static product page (what tuhi is, the GIF, per-OS download
+  links, the GitHub link), built from the README content and brand palette. Host it free
+  on **Cloudflare Pages at `tuhi.pages.dev`** for launch; a custom domain (`tuhi.dev` /
+  `tuhi.nz`, ~US$10/yr) waits until there's community traction — switching is just a DNS
+  change, no rebuild.
 
 ## Planned / under consideration
 
