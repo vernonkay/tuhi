@@ -1045,6 +1045,67 @@ impl Buffer for RopeBuffer {
 
 // Tauri commands — thin delegations to the active buffer behind the mutex.
 
+/// Verdict on whether a file looks like binary (not meaningful to open as text). The UI
+/// gates on this before opening, so a `.docx` or an image isn't rendered as garbage.
+#[derive(Serialize)]
+pub struct FileSniff {
+    pub binary: bool,
+    /// A short human reason when `binary`, else empty.
+    pub reason: String,
+}
+
+/// Classify a leading chunk of a file as text or binary. Content first, so an
+/// extensionless file or a `.log` still opens and a `.docx` (a ZIP) is caught:
+/// - A UTF-8 or UTF-16 byte-order mark means text (UTF-16 is full of NUL bytes but is
+///   text we can open, so the BOM check must come before the NUL check).
+/// - A NUL byte is the classic binary signal — text files don't contain one.
+/// - Otherwise a high proportion of control bytes (outside tab/newline/CR/FF) means binary.
+fn sniff_bytes(chunk: &[u8]) -> FileSniff {
+    let text = FileSniff {
+        binary: false,
+        reason: String::new(),
+    };
+    if chunk.is_empty() {
+        return text;
+    }
+    if chunk.starts_with(&[0xEF, 0xBB, 0xBF]) // UTF-8 BOM
+        || chunk.starts_with(&[0xFF, 0xFE])    // UTF-16 LE BOM
+        || chunk.starts_with(&[0xFE, 0xFF])
+    // UTF-16 BE BOM
+    {
+        return text;
+    }
+    if chunk.contains(&0) {
+        return FileSniff {
+            binary: true,
+            reason: "contains null bytes".into(),
+        };
+    }
+    // Control bytes except the common text ones (\t \n \v \f \r) and DEL.
+    let suspicious = chunk
+        .iter()
+        .filter(|&&b| b < 0x09 || (0x0e..=0x1f).contains(&b) || b == 0x7f)
+        .count();
+    if suspicious * 100 / chunk.len() > 30 {
+        return FileSniff {
+            binary: true,
+            reason: "mostly non-text bytes".into(),
+        };
+    }
+    text
+}
+
+/// Read the first chunk of a file and classify it as text or binary, for the open-type
+/// guard. Reads at most 8 KiB, so it is cheap even for a huge file.
+#[tauri::command]
+pub fn sniff_file(path: String) -> Result<FileSniff, EditorError> {
+    use std::io::Read;
+    let mut f = std::fs::File::open(&path)?;
+    let mut buf = [0u8; 8192];
+    let n = f.read(&mut buf)?;
+    Ok(sniff_bytes(&buf[..n]))
+}
+
 /// Open a file as a new tab (or switch to it if already open).
 ///
 /// `async` with the heavy work on a blocking worker: reading the file, decoding it,
@@ -1675,6 +1736,36 @@ mod tests {
         rs.insert(0, "fn main() { let x = 1; }\n").unwrap();
         rs.rehighlight();
         assert!(!rs.highlights.is_empty(), "code must still be highlighted");
+    }
+
+    #[test]
+    fn sniff_classifies_text_and_binary() {
+        assert!(!sniff_bytes(b"").binary, "empty is text");
+        assert!(!sniff_bytes(b"# Heading\n\nplain text with\ttabs.\r\n").binary);
+        assert!(
+            !sniff_bytes("code \u{2014} em dash, \u{1F600}".as_bytes()).binary,
+            "utf-8 prose is text"
+        );
+        assert!(
+            sniff_bytes(b"PK\x03\x04\x00\x00binary").binary,
+            "a null byte is binary"
+        );
+        assert!(
+            sniff_bytes(&[0xFF, 0xD8, 0xFF, 0xE0, 0x10, 0x11, 0x12, 0x13]).binary,
+            "non-text bytes are binary"
+        );
+    }
+
+    #[test]
+    fn sniff_treats_utf16_bom_as_text_despite_nulls() {
+        // UTF-16 LE "Hi": BOM then 'H',0,'i',0 — full of NUL but still openable text.
+        let utf16 = [0xFF, 0xFE, b'H', 0x00, b'i', 0x00];
+        assert!(
+            !sniff_bytes(&utf16).binary,
+            "a UTF-16 BOM means text, NULs and all"
+        );
+        // UTF-8 BOM then text.
+        assert!(!sniff_bytes(&[0xEF, 0xBB, 0xBF, b'h', b'i']).binary);
     }
 
     #[test]
