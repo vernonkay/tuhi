@@ -171,6 +171,14 @@
         color: var(--ink);
         font-weight: 600;
       }
+      .hero-gif {
+        display: block; width: 100%; height: auto; max-width: 880px;
+        margin: 44px auto 0; border: 1px solid var(--border); border-radius: 12px;
+        box-shadow: 0 16px 50px rgba(0, 0, 0, 0.12);
+      }
+      @media (prefers-color-scheme: dark) {
+        .hero-gif { box-shadow: 0 16px 50px rgba(0, 0, 0, 0.5); }
+      }
 
       section.features {
         display: grid;
@@ -259,6 +267,14 @@
         <p class="status">
           Open source · MIT · <b>approaching v1.0</b> · Windows, macOS &amp; Linux
         </p>
+        <img
+          class="hero-gif"
+          src="hero.gif"
+          width="1000"
+          height="600"
+          alt="tuhi in action: open a 4 MB file, filter a log, render Markdown, and edit a block in place"
+          loading="lazy"
+        />
       </header>
 
       <section class="features">
