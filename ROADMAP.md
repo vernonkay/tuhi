@@ -55,6 +55,21 @@ feature, then hardening and finish. (Target date: TBD.)
    (Ctrl/Ctrl+Shift+arrows), document and page jumps (Ctrl+Home/End, PageUp/Down, with
    Shift to extend), and delete-word (Ctrl+Backspace/Delete).
 
+## v1.0 release prep — the finish line
+
+Not features so much as the things a public 1.0 needs on the day:
+
+- **Open-type guard** — don't render a binary file as garbage. Detect binary content
+  (NUL bytes / invalid-UTF-8 ratio in the first chunk) and gate it behind an
+  "open anyway?" prompt, with a configurable `alwaysText` / `neverOpen` extension list
+  on top for overrides. Content detection first, extension list second, so a `.log` or
+  an extensionless file still opens and a `.docx` (a ZIP) is caught.
+- **A proper README for first run** — what tuhi is and who it's for, install per OS, the
+  large-file and Markdown stories up front, the keyboard set, and a screenshot or two.
+  It's the first thing a new installer sees.
+- **A fresh demo GIF** — the current one predates the Twin-Gutters chrome, the big-file
+  verbs and Markdown mode; re-record once the feature set is frozen.
+
 ## Planned / under consideration
 
 Shaped partly by a study of why Google's Xi-editor was abandoned (see
@@ -76,5 +91,8 @@ quietly block shippable work.
   the edges and never the edit model.
 - **A smarter outline for very large documents** — summarise/bucket huge flat heading
   lists instead of listing every one.
+- **Virtualized Markdown preview** — render only the blocks in view so the live preview
+  scales to huge documents and the current ~512 KB preview cap can be lifted (above it a
+  Markdown file opens as source today).
 - Modern multi-cursor, find-in-files, show-unprintable-characters.
 - Signed / notarised builds once there's traction (0.1.0 ships unsigned).

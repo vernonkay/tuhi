@@ -240,6 +240,14 @@ const GUTTER = 64; // `.gutter` border-box width; its 12px padding-right sits IN
 // via `request_highlight` instead, and the outline built on open is kept as-is.
 const HIGHLIGHT_MAX_CHARS = 2 * 1024 * 1024;
 
+// Cap on the live Markdown preview, in characters. The preview renders every block as
+// a DOM node eagerly (no virtualization yet), so a very large document — a 4 MB Notion
+// export is ~170k lines / tens of thousands of blocks — would build an enormous DOM and
+// re-parse + re-render the lot on every edit, stalling scroll and typing. Above the cap
+// a Markdown file opens in the normal windowed source editor (which streams fine at any
+// size) and the preview toggle is disabled. Lifting this needs a virtualized preview.
+const MD_PREVIEW_MAX_CHARS = 512 * 1024;
+
 /** Platform-appropriate shortcut label: "⌘O" on macOS, "Ctrl+O" elsewhere. */
 const IS_MAC =
   typeof navigator !== "undefined" && /Mac|iPhone|iPad|iPod/.test(navigator.platform || navigator.userAgent || "");
@@ -337,8 +345,11 @@ function App() {
   const [outlineQuery, setOutlineQuery] = useState("");
   const [outlineExpanded, setOutlineExpanded] = useState<Set<number>>(new Set());
   // Live (hybrid) Markdown preview.
-  const [livePreview, setLivePreview] = useState(false);
+  // A Markdown file opens in the rendered preview by default; this flips it to the
+  // raw whole-document source editor (the rail "Source" dot / palette command).
+  const [editSource, setEditSource] = useState(false);
   const [blocks, setBlocks] = useState<MdBlock[]>([]);
+  const [blocksLoading, setBlocksLoading] = useState(false);
   // Edit-in-place: the index of the block currently open as raw source (or null).
   // The ref mirrors it so blur/commit handlers read a synchronous value, and the
   // skip flag lets Esc cancel without the imminent blur committing.
@@ -397,11 +408,16 @@ function App() {
   }, []);
 
   const refreshBlocks = useCallback(async () => {
+    // Keep the current blocks on screen while the (off-thread) parse runs, so an edit
+    // re-parse doesn't flash; the loading flag suppresses the "empty" message meanwhile.
+    setBlocksLoading(true);
     try {
       setBlocks(await invoke<MdBlock[]>("markdown_blocks"));
     } catch (e) {
       setError(String(e));
       setBlocks([]);
+    } finally {
+      setBlocksLoading(false);
     }
   }, []);
 
@@ -603,9 +619,14 @@ function App() {
   const lineCount = meta?.line_count ?? 0;
   const readonly = meta?.readonly ?? false;
   const isMarkdown = !!meta?.path && /\.(md|markdown|mdx)$/i.test(meta.path);
-  // Live preview renders only for an editable Markdown file; non-markdown or large
-  // read-only files keep the plain editor even if the toggle is left on.
-  const showLive = livePreview && !!meta && isMarkdown && !readonly;
+  // The preview renders eagerly, so it is only offered below the size cap; a larger
+  // Markdown file opens in the source editor regardless of the toggle (see the cap note).
+  const mdPreviewable = isMarkdown && !readonly && (meta?.char_count ?? 0) <= MD_PREVIEW_MAX_CHARS;
+  // The rendered preview is the default view for a previewable Markdown file; the
+  // "Source" toggle drops it to the raw whole-document editor. Non-markdown, large or
+  // read-only files always use the plain editor (there is nothing to render, or it would
+  // not scale).
+  const showLive = !editSource && !!meta && mdPreviewable;
 
   useEffect(() => {
     const measure = () => {
@@ -738,11 +759,14 @@ function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [showLive, activeTabId, meta?.path, meta?.char_count, refreshBlocks]);
 
-  // Close any open block editor when the preview is hidden or the file/tab changes,
-  // so a stale block index can't survive into a different document.
+  // Close any open block editor and drop stale blocks when the preview is hidden or the
+  // file/tab changes, so a stale block index — or the previous document's rendered
+  // content — can't survive into a different document. (Edit re-parses keep their blocks
+  // on screen: this is keyed on the file/view, not on char_count.)
   useEffect(() => {
     setEditBlock(null);
     editBlockRef.current = null;
+    setBlocks([]);
   }, [showLive, activeTabId, meta?.path]);
 
   const ensureCaretVisible = useCallback((line: number) => {
@@ -2130,7 +2154,7 @@ function App() {
       ...(meta ? [{ label: "Save", hint: combo("S"), kind: C, run: () => void handleSave() }] : []),
       ...(meta ? [{ label: "Find in file…", hint: combo("F"), kind: C, run: () => openFind(false) }] : []),
       ...(meta ? [{ label: "Go to line…", hint: combo("G"), kind: C, run: () => { setGotoValue(""); setGotoOpen(true); setTimeout(() => gotoInputRef.current?.focus(), 0); } }] : []),
-      ...(meta && isMarkdown && !readonly ? [{ label: showLive ? "Hide live preview" : "Live preview (Markdown)", kind: C, run: () => setLivePreview((v) => !v) }] : []),
+      ...(meta && mdPreviewable ? [{ label: showLive ? "Edit Markdown source" : "Preview Markdown", kind: C, run: () => setEditSource((v) => !v) }] : []),
       ...(meta && !readonly ? [{ label: "Format JSON (pretty-print)", kind: C, run: () => void formatJson() }] : []),
       ...(meta ? [{ label: "Filter lines to view…", kind: C, run: () => openFilter() }] : []),
       ...(meta?.path ? [{ label: followOn ? "Stop following file" : "Follow file (tail)", kind: C, run: () => toggleFollow() }] : []),
@@ -2487,7 +2511,9 @@ function App() {
         <div className="mdview-inner" onClick={onPreviewClick}>
           {blocks.length
             ? blocks.map(renderBlockEditable)
-            : <p className="md-empty">This document is empty.</p>}
+            : blocksLoading
+              ? <p className="md-empty">Rendering…</p>
+              : <p className="md-empty">This document is empty.</p>}
         </div>
       </div>
       ) : (
@@ -2654,13 +2680,23 @@ function App() {
       <aside className="gut gut-r">
         <div className="gut-cap" />
         <button
-          className={`gut-dot-btn${showLive ? " on" : ""}`}
-          onClick={() => setLivePreview((v) => !v)}
-          disabled={!meta || !isMarkdown || readonly}
-          title={isMarkdown ? "Live preview" : "Live preview (Markdown files only)"}
+          className={`gut-dot-btn${editSource && mdPreviewable ? " on" : ""}`}
+          onClick={() => setEditSource((v) => !v)}
+          disabled={!meta || !mdPreviewable}
+          title={
+            !isMarkdown
+              ? "Source view (Markdown files preview by default)"
+              : readonly
+                ? "Preview unavailable for read-only files"
+                : !mdPreviewable
+                  ? "Preview unavailable for large Markdown files (opens as source)"
+                  : showLive
+                    ? "Edit source (whole document)"
+                    : "Back to preview"
+          }
         >
           <span className="gd" />
-          <span className="gd-label">Preview</span>
+          <span className="gd-label">Source</span>
         </button>
         <button
           className={`gut-dot-btn${leftPanel === "outline" ? " on" : ""}`}
