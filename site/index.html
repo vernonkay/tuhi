@@ -1,0 +1,301 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>tuhi — a fast, calm text &amp; Markdown editor</title>
+    <meta
+      name="description"
+      content="tuhi is a fast, open-source text and Markdown editor that isn't afraid of big files. Cross-platform, keyboard-first, with a hybrid Markdown preview you edit in place."
+    />
+    <meta property="og:title" content="tuhi" />
+    <meta
+      property="og:description"
+      content="A fast, calm text & Markdown editor that isn't afraid of big files."
+    />
+    <meta name="theme-color" content="#FAF9F6" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#101217" media="(prefers-color-scheme: dark)" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700;12..96,800&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap"
+      rel="stylesheet"
+    />
+    <style>
+      :root {
+        --ink: #15181e;
+        --paper: #faf9f6;
+        --panel: #f1efe9;
+        --coral: #f2502b;
+        --slate: #8a8f98;
+        --border: #e4e1d8;
+        --coral-soft: #fae3dc;
+        --ui: "Inter", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+        --display: "Bricolage Grotesque", var(--ui);
+        --mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --ink: #f2f0ea;
+          --paper: #101217;
+          --panel: #171a21;
+          --coral: #ff6a47;
+          --slate: #9ba1ac;
+          --border: #262a33;
+          --coral-soft: #2a1b16;
+          color-scheme: dark;
+        }
+      }
+      * {
+        box-sizing: border-box;
+      }
+      html {
+        -webkit-text-size-adjust: 100%;
+      }
+      body {
+        margin: 0;
+        background: var(--paper);
+        color: var(--ink);
+        font-family: var(--ui);
+        line-height: 1.6;
+        font-size: 17px;
+        -webkit-font-smoothing: antialiased;
+      }
+      .wrap {
+        max-width: 860px;
+        margin: 0 auto;
+        padding-left: max(20px, env(safe-area-inset-left));
+        padding-right: max(20px, env(safe-area-inset-right));
+      }
+      a {
+        color: var(--coral);
+        text-decoration: none;
+      }
+      a:hover {
+        text-decoration: underline;
+      }
+
+      /* Logomark: a caret over a written line (the brand mark). */
+      .mark {
+        width: 48px;
+        height: 48px;
+        display: block;
+        margin: 0 auto 28px;
+      }
+      .mark .caret {
+        stroke: var(--coral);
+      }
+      .mark .line {
+        stroke: var(--ink);
+      }
+
+      header.hero {
+        text-align: center;
+        padding: 72px 0 8px;
+      }
+      .wordmark {
+        font-family: var(--ui);
+        font-weight: 700;
+        font-size: clamp(56px, 13vw, 104px);
+        letter-spacing: -0.04em;
+        line-height: 1;
+        margin: 0;
+      }
+      .wordmark .dot {
+        color: var(--coral);
+      }
+      .meaning {
+        color: var(--slate);
+        font-family: var(--mono);
+        font-size: 13px;
+        letter-spacing: 0.02em;
+        margin: 18px 0 0;
+      }
+      .tagline {
+        font-family: var(--display);
+        font-weight: 600;
+        font-size: clamp(24px, 5vw, 38px);
+        line-height: 1.2;
+        letter-spacing: -0.015em;
+        text-wrap: balance;
+        max-width: 18ch;
+        margin: 28px auto 0;
+      }
+      .sub {
+        color: var(--slate);
+        max-width: 54ch;
+        margin: 18px auto 0;
+      }
+
+      .cta {
+        display: flex;
+        gap: 12px;
+        justify-content: center;
+        flex-wrap: wrap;
+        margin: 36px 0 8px;
+      }
+      .btn {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        font-weight: 600;
+        font-size: 15px;
+        padding: 11px 20px;
+        border-radius: 9px;
+        border: 1px solid transparent;
+      }
+      .btn:hover {
+        text-decoration: none;
+      }
+      .btn.primary {
+        background: var(--coral);
+        color: #fff;
+      }
+      .btn.primary:hover {
+        filter: brightness(1.05);
+      }
+      .btn.ghost {
+        border-color: var(--border);
+        color: var(--ink);
+      }
+      .btn.ghost:hover {
+        border-color: var(--slate);
+      }
+      .status {
+        text-align: center;
+        color: var(--slate);
+        font-size: 13.5px;
+        margin-top: 10px;
+      }
+      .status b {
+        color: var(--ink);
+        font-weight: 600;
+      }
+
+      section.features {
+        display: grid;
+        grid-template-columns: repeat(2, 1fr);
+        gap: 1px;
+        background: var(--border);
+        border: 1px solid var(--border);
+        border-radius: 14px;
+        overflow: hidden;
+        margin: 64px 0;
+      }
+      .feature {
+        background: var(--paper);
+        padding: 26px 24px;
+      }
+      .feature h3 {
+        font-family: var(--display);
+        font-weight: 700;
+        font-size: 18px;
+        margin: 0 0 8px;
+        letter-spacing: -0.01em;
+      }
+      .feature h3 .tick {
+        color: var(--coral);
+        font-family: var(--mono);
+        margin-right: 7px;
+      }
+      .feature p {
+        margin: 0;
+        color: var(--slate);
+        font-size: 15px;
+      }
+      .feature code {
+        font-family: var(--mono);
+        font-size: 0.86em;
+        background: var(--coral-soft);
+        color: var(--ink);
+        padding: 0.1em 0.35em;
+        border-radius: 4px;
+      }
+      @media (max-width: 560px) {
+        section.features {
+          grid-template-columns: 1fr;
+        }
+      }
+
+      footer {
+        border-top: 1px solid var(--border);
+        padding: 32px 0 calc(40px + env(safe-area-inset-bottom));
+        color: var(--slate);
+        font-size: 13.5px;
+        display: flex;
+        justify-content: space-between;
+        gap: 12px;
+        flex-wrap: wrap;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <header class="hero">
+        <svg class="mark" viewBox="0 0 48 48" fill="none" aria-hidden="true">
+          <path
+            class="caret"
+            d="M14 22 L24 12 L34 22"
+            stroke-width="3.2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          />
+          <path class="line" d="M10 34 H38" stroke-width="3.2" stroke-linecap="round" />
+        </svg>
+        <h1 class="wordmark">tuhi<span class="dot">.</span></h1>
+        <p class="meaning">tuhi &mdash; Māori: to write, to inscribe, to record</p>
+        <p class="tagline">A fast, calm editor that isn't afraid of big files.</p>
+        <p class="sub">
+          An open-source text and Markdown editor for Windows, macOS and Linux. It opens
+          multi-gigabyte files without flinching, and its Markdown preview lets you click a
+          block and edit it in place.
+        </p>
+        <div class="cta">
+          <a class="btn primary" href="https://github.com/vernonkay/tuhi">View on GitHub</a>
+          <a class="btn ghost" href="https://github.com/vernonkay/tuhi/blob/main/ROADMAP.md"
+            >Roadmap</a
+          >
+        </div>
+        <p class="status">
+          Open source · MIT · <b>approaching v1.0</b> · Windows, macOS &amp; Linux
+        </p>
+      </header>
+
+      <section class="features">
+        <div class="feature">
+          <h3><span class="tick">&gt;</span>Big files, no fear</h3>
+          <p>
+            Open and scroll multi-gigabyte files with flat memory. Find, go-to-line and live
+            filtering work at that scale, not just scrolling.
+          </p>
+        </div>
+        <div class="feature">
+          <h3><span class="tick">&gt;</span>Markdown you edit in place</h3>
+          <p>
+            Documents render by default; click any block to open just that block as raw
+            Markdown, edit, and it re-renders. No separate preview pane to manage.
+          </p>
+        </div>
+        <div class="feature">
+          <h3><span class="tick">&gt;</span>Fast and keyboard-first</h3>
+          <p>
+            A command palette, the full set of editor shortcuts, and a UI that stays out of
+            the way. Reach for the mouse only when you want to.
+          </p>
+        </div>
+        <div class="feature">
+          <h3><span class="tick">&gt;</span>Plain by nature</h3>
+          <p>
+            Your files stay plain <code>.md</code> and <code>.txt</code> on disk — no vault, no
+            lock-in, no proprietary format. Just text, done well.
+          </p>
+        </div>
+      </section>
+
+      <footer>
+        <span>Made in Aotearoa New Zealand.</span>
+        <span>© 2026 Vernon Kay · <a href="https://github.com/vernonkay/tuhi">source &amp; MIT licence</a></span>
+      </footer>
+    </div>
+  </body>
+</html>
