@@ -872,3 +872,25 @@ html, body, #root {
   margin-top: 4px; font-family: var(--ui-font); font-size: 11px; color: var(--slate);
 }
 .md-blockedit-hint b { font-weight: 600; color: var(--ink); }
+
+/* ---- crash-recovery bar ---- */
+.recovery-bar {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 8px 14px; background: var(--coral-soft);
+  border-bottom: 1px solid var(--border); font-size: 13px; color: var(--ink);
+}
+.recovery-icon { color: var(--coral); }
+.recovery-msg { font-weight: 600; }
+.recovery-items { display: flex; gap: 14px; flex-wrap: wrap; flex: 1; min-width: 0; }
+.recovery-item { display: inline-flex; align-items: center; gap: 6px; }
+.recovery-name {
+  font-family: var(--mono-font); font-size: 12px; max-width: 220px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.recovery-btn {
+  font: inherit; font-size: 12px; cursor: pointer; padding: 3px 9px; border-radius: 5px;
+  border: 1px solid var(--coral); background: var(--coral); color: #fff;
+}
+.recovery-btn.ghost { background: transparent; color: var(--slate); border-color: var(--border); }
+.recovery-btn:hover { filter: brightness(1.05); }
+.recovery-btn.ghost:hover { color: var(--ink); border-color: var(--slate); }

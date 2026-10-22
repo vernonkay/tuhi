@@ -260,6 +260,15 @@ interface FileSniff {
   reason: string;
 }
 
+/** Mirror of the Rust `RecoveryMeta`: one unsaved buffer recovered from a previous session. */
+interface RecoveryMeta {
+  id: string;
+  path: string | null;
+  name: string;
+  char_count: number;
+  saved_at: number;
+}
+
 // Open-type guard overrides, per viewer, until the Settings panel manages them: file
 // extensions to always open as text (skip the binary check) or to always gate. Content
 // detection leads; these are overrides on top (see `shouldOpenAsText`).
@@ -617,6 +626,9 @@ function App() {
   const [caret, setCaret] = useState<Caret | null>(null);
   const [anchor, setAnchor] = useState<number | null>(null); // selection anchor char index
   const [error, setError] = useState<string | null>(null);
+  // Unsaved buffers recovered from a previous session (crash or quit-with-unsaved).
+  const [recovery, setRecovery] = useState<RecoveryMeta[]>([]);
+  const recoveryTimer = useRef<number | null>(null);
   const [busy, setBusy] = useState(false);
 
   // Find / replace
@@ -946,6 +958,54 @@ function App() {
     if (activeTabId != null) await closeTab(activeTabId);
   }, [activeTabId, closeTab]);
 
+  // On launch, offer any unsaved buffers left by a previous session (a crash, or quitting
+  // with unsaved work). Runs once, before edits can write new snapshots, so it sees only
+  // the previous session's.
+  useEffect(() => {
+    void (async () => {
+      try {
+        setRecovery(await invoke<RecoveryMeta[]>("list_recovery"));
+      } catch {
+        /* no recovery dir yet, or none to recover */
+      }
+    })();
+  }, []);
+
+  // Snapshot dirty buffers to the recovery journal a couple of seconds after edits settle
+  // (and after a save or tab switch, which also removes now-clean snapshots). Debounced so
+  // a burst of typing writes at most one snapshot. The command is a no-op when nothing is
+  // dirty, so firing on every meta change is cheap.
+  useEffect(() => {
+    if (recoveryTimer.current != null) clearTimeout(recoveryTimer.current);
+    recoveryTimer.current = window.setTimeout(() => {
+      void invoke("sync_recovery").catch(() => {});
+    }, 2000);
+    return () => {
+      if (recoveryTimer.current != null) clearTimeout(recoveryTimer.current);
+    };
+  }, [meta?.char_count, meta?.dirty, activeTabId]);
+
+  const restoreRecovery = useCallback(
+    async (id: string) => {
+      try {
+        await applyTabsState(await invoke<TabsState>("restore_recovery", { id, dark: darkRef.current }));
+      } catch (e) {
+        setError(String(e));
+      }
+      setRecovery((r) => r.filter((e) => e.id !== id));
+    },
+    [applyTabsState],
+  );
+
+  const discardRecovery = useCallback(async (id: string) => {
+    try {
+      await invoke("discard_recovery", { id });
+    } catch {
+      /* best effort */
+    }
+    setRecovery((r) => r.filter((e) => e.id !== id));
+  }, []);
+
   // Highlighting is off the keystroke path: recompute ~180 ms after typing stops,
   // then refresh the viewport so the new colours show. Keeps typing instant.
   const scheduleRehighlight = useCallback(() => {
@@ -1100,6 +1160,7 @@ function App() {
     }
     try {
       setMeta(await invoke<DocumentMeta>("save_document", { path: target }));
+      void invoke("sync_recovery").catch(() => {}); // drop the now-saved buffer's snapshot
     } catch (e) {
       setError(String(e));
     }
@@ -2598,6 +2659,37 @@ function App() {
       )}
 
       <div className="workarea">
+      {recovery.length > 0 && (
+        <div className="recovery-bar">
+          <span className="recovery-icon" aria-hidden>⏱</span>
+          <span className="recovery-msg">
+            {recovery.length} unsaved {recovery.length === 1 ? "file" : "files"} from a previous
+            session:
+          </span>
+          <div className="recovery-items">
+            {recovery.map((r) => (
+              <span className="recovery-item" key={r.id}>
+                <span className="recovery-name" title={r.path ?? r.name}>{r.name}</span>
+                <button className="recovery-btn" onClick={() => void restoreRecovery(r.id)}>
+                  Restore
+                </button>
+                <button className="recovery-btn ghost" onClick={() => void discardRecovery(r.id)}>
+                  Discard
+                </button>
+              </span>
+            ))}
+          </div>
+          <button
+            className="recovery-btn"
+            onClick={() => recovery.forEach((r) => void restoreRecovery(r.id))}
+          >
+            Restore all
+          </button>
+          <button className="recovery-btn ghost" onClick={() => setRecovery([])} title="Hide (keep for next launch)">
+            Later
+          </button>
+        </div>
+      )}
       {showLive ? (
       <div className={`mdview${editBlock != null ? " editing" : ""}`} ref={mdScrollRef} tabIndex={0}>
         {blocks.length ? (
