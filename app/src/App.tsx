@@ -4,6 +4,10 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { ask, open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { readText, writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { useVirtualizer } from "@tanstack/react-virtual";
+import hljs from "highlight.js/lib/common";
+import mermaid from "mermaid";
+import katex from "katex";
+import "katex/dist/katex.min.css";
 import "./App.css";
 
 /** Mirror of the Rust `DocumentMeta` (editor/mod.rs). */
@@ -80,6 +84,16 @@ interface MdRun {
   code: boolean;
   strike: boolean;
   href: string | null;
+  /** Math run: `text` is TeX, rendered with KaTeX; `display` = block math. */
+  math?: boolean;
+  display?: boolean;
+}
+
+/** Structured table data (mirror of Rust `TableData`). */
+interface MdTable {
+  aligns: string[];
+  header: MdRun[][];
+  rows: MdRun[][][];
 }
 
 /** One Markdown block with its source line span (mirror of Rust `Block`). */
@@ -97,6 +111,8 @@ interface MdBlock {
   raw: string;
   /** The block's verbatim source lines, for edit-in-place (mirror of Rust `source`). */
   source: string;
+  /** Structured table (mirror of Rust `table`), present when kind is "table". */
+  table?: MdTable | null;
 }
 
 /** Mirror of the Rust `DirEntry` (one file-tree row). */
@@ -314,6 +330,51 @@ async function shouldOpenAsText(path: string): Promise<boolean> {
   return true;
 }
 
+/** Render a ```mermaid fence as a diagram. Mermaid renders asynchronously to an SVG, so
+ *  the block shows a quiet placeholder while rendering and falls back to the raw code on a
+ *  parse error. Re-renders when the code or the theme changes. */
+function MermaidBlock({ code, dark }: { code: string; dark: boolean }) {
+  const [svg, setSvg] = useState<string | null>(null);
+  const [failed, setFailed] = useState(false);
+  useEffect(() => {
+    let alive = true;
+    setSvg(null);
+    setFailed(false);
+    try {
+      mermaid.initialize({
+        startOnLoad: false,
+        securityLevel: "strict",
+        theme: dark ? "dark" : "default",
+      });
+    } catch {
+      /* initialize is idempotent; ignore */
+    }
+    const id = "mmd-" + Math.random().toString(36).slice(2, 10);
+    mermaid
+      .render(id, code)
+      .then((r) => {
+        if (alive) setSvg(r.svg);
+      })
+      .catch(() => {
+        if (alive) setFailed(true);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [code, dark]);
+  if (failed) {
+    return (
+      <pre className="md-codeblock" data-lang="mermaid">
+        <code>{code}</code>
+      </pre>
+    );
+  }
+  if (svg == null) {
+    return <div className="md-mermaid md-mermaid-pending">rendering diagram…</div>;
+  }
+  return <div className="md-mermaid" dangerouslySetInnerHTML={{ __html: svg }} />;
+}
+
 /** The caret-over-a-line brand mark (docs/brand.md). Coral caret, ink line. */
 function Mark({ size = 20 }: { size?: number }) {
   return (
@@ -449,6 +510,9 @@ function App() {
     }
     return "auto";
   });
+  // Reactive resolved dark mode (the theme effect also keeps `darkRef`); used by rendered
+  // content that must restyle on theme change, e.g. Mermaid diagrams.
+  const [isDark, setIsDark] = useState(false);
 
   // Close the highlighter rules editor, returning to Settings if it opened from there
   // (it's a modal reached from within Settings, not a sibling of the editor).
@@ -747,6 +811,7 @@ function App() {
     const apply = () => {
       const dark = theme === "dark" ? true : theme === "light" ? false : mq.matches;
       darkRef.current = dark;
+      setIsDark(dark);
       document.documentElement.dataset.theme = dark ? "dark" : "light";
       try {
         localStorage.setItem("tuhi.theme", theme);
@@ -1186,6 +1251,37 @@ function App() {
     [applyTabsState, revealInTree, remember],
   );
 
+  // Open the welcome guide (first run, and the palette command). The guide is written to
+  // the app-data dir by `ensure_welcome` if missing, then opened as a normal editable doc.
+  const openWelcome = useCallback(async () => {
+    try {
+      const path = await invoke<string>("ensure_welcome");
+      await applyTabsState(await invoke<TabsState>("open_document", { path, dark: darkRef.current }));
+      remember(path, "file");
+    } catch (e) {
+      setError(String(e));
+    }
+  }, [applyTabsState, remember]);
+
+  // First run only: open the welcome guide, unless there's a session to restore. Marks
+  // itself done in localStorage so it never fires again.
+  useEffect(() => {
+    let welcomed = true;
+    try {
+      welcomed = localStorage.getItem("tuhi.welcomedV1") === "1";
+    } catch {
+      /* if storage is unavailable, do nothing */
+    }
+    if (welcomed) return;
+    try {
+      localStorage.setItem("tuhi.welcomedV1", "1");
+    } catch {
+      /* best effort */
+    }
+    if (savedSession.files.length === 0) void openWelcome();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // Open a folder by path: list it, pin it as the tree root, remember it.
   const openFolderAt = useCallback(
     async (path: string) => {
@@ -1252,6 +1348,17 @@ function App() {
 
   const jumpToLine = useCallback(
     async (line: number) => {
+      // In the live preview the source scroller isn't mounted, so scroll the virtualized
+      // preview to the block that owns this line (the last block starting at/before it).
+      if (showLive) {
+        let idx = -1;
+        for (let k = 0; k < blocks.length; k++) {
+          if (blocks[k].start_line <= line) idx = k;
+          else break;
+        }
+        if (idx >= 0) mdVirtualizer.scrollToIndex(idx, { align: "start" });
+        return;
+      }
       try {
         const idx = await invoke<number>("pos_to_char", { line, col: 0 });
         await setCaretFromIdx(idx);
@@ -1260,7 +1367,7 @@ function App() {
         setError(String(e));
       }
     },
-    [setCaretFromIdx],
+    [showLive, blocks, mdVirtualizer, setCaretFromIdx],
   );
 
   // The outline as a nested tree, and a sensible default expansion: small files open
@@ -2160,6 +2267,23 @@ function App() {
   // ---- live Markdown preview rendering ----
   const renderInline = (runs: MdRun[]): React.ReactNode =>
     runs.map((r, i) => {
+      if (r.math) {
+        let html = "";
+        try {
+          html = katex.renderToString(r.text, { displayMode: !!r.display, throwOnError: false });
+        } catch {
+          html = "";
+        }
+        return html ? (
+          <span
+            key={i}
+            className={r.display ? "md-math md-math-display" : "md-math"}
+            dangerouslySetInnerHTML={{ __html: html }}
+          />
+        ) : (
+          <code key={i} className="md-code">{r.text}</code>
+        );
+      }
       let el: React.ReactNode = r.code ? <code className="md-code">{r.text}</code> : r.text;
       if (r.strike) el = <s>{el}</s>;
       if (r.italic) el = <em>{el}</em>;
@@ -2198,14 +2322,76 @@ function App() {
           </div>
         );
       }
-      case "code":
+      case "code": {
+        const code = b.raw.replace(/\n$/, "");
+        // A ```mermaid fence renders as a diagram (wrapped so click-to-edit still tags it).
+        if (b.lang === "mermaid") {
+          return (
+            <div key={i} className="md-mermaid-wrap">
+              <MermaidBlock code={code} dark={isDark} />
+            </div>
+          );
+        }
+        // Highlight only when the language is known (no expensive auto-detect); fall back
+        // to plain, escaped text otherwise. hljs output is sanitized token markup.
+        let html: string | null = null;
+        if (b.lang && hljs.getLanguage(b.lang)) {
+          try {
+            html = hljs.highlight(code, { language: b.lang }).value;
+          } catch {
+            html = null;
+          }
+        }
         return (
           <pre key={i} className="md-codeblock" data-lang={b.lang || undefined}>
-            <code>{b.raw.replace(/\n$/, "")}</code>
+            {html ? (
+              <code className="hljs" dangerouslySetInnerHTML={{ __html: html }} />
+            ) : (
+              <code>{code}</code>
+            )}
           </pre>
         );
-      case "table":
-        return <pre key={i} className="md-raw" data-tag="table">{b.raw.replace(/\n$/, "")}</pre>;
+      }
+      case "table": {
+        const t = b.table;
+        if (!t) {
+          return (
+            <pre key={i} className="md-raw" data-tag="table">
+              {b.raw.replace(/\n$/, "")}
+            </pre>
+          );
+        }
+        const align = (c: number): "left" | "center" | "right" | undefined => {
+          const a = t.aligns[c];
+          return a === "left" || a === "center" || a === "right" ? a : undefined;
+        };
+        return (
+          <div key={i} className="md-table-wrap">
+            <table className="md-table">
+              <thead>
+                <tr>
+                  {t.header.map((cell, c) => (
+                    <th key={c} style={{ textAlign: align(c) }}>
+                      {renderInline(cell)}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {t.rows.map((row, r) => (
+                  <tr key={r}>
+                    {row.map((cell, c) => (
+                      <td key={c} style={{ textAlign: align(c) }}>
+                        {renderInline(cell)}
+                      </td>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        );
+      }
       case "rule":
         return <hr key={i} className="md-rule" />;
       case "html":
@@ -2313,6 +2499,7 @@ function App() {
       ...(meta?.path ? [{ label: followOn ? "Stop following file" : "Follow file (tail)", kind: C, run: () => toggleFollow() }] : []),
       { label: "Edit highlighters…", kind: C, run: () => { setHlFromSettings(false); setHlEditorOpen(true); } },
       { label: "Settings…", kind: C, run: () => setSettingsOpen(true) },
+      { label: "Open the welcome guide", kind: C, run: () => void openWelcome() },
       { label: "Show files", kind: C, run: () => setLeftPanel((v) => (v === "files" ? null : "files")) },
       ...(meta ? [{ label: "Show outline", kind: C, run: () => setLeftPanel((v) => (v === "outline" ? null : "outline")) }] : []),
       ...tabs.map((t) => ({ label: t.name, kind: "tab" as const, run: () => void switchTab(t.id) })),

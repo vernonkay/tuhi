@@ -43,6 +43,7 @@ pub fn run() {
             editor::list_recovery,
             editor::restore_recovery,
             editor::discard_recovery,
+            editor::ensure_welcome,
             editor::refresh_highlights,
             editor::set_theme,
             editor::list_dir,
