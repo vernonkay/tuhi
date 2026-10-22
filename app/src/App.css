@@ -839,3 +839,31 @@ html, body, #root {
 .md-link:hover { border-bottom-color: var(--coral); }
 .mdview strong { font-weight: 700; }
 .mdview em { font-style: italic; }
+
+/* ---- edit-in-place (hybrid) ---- */
+/* The hover affordance is PAINTED (background + inset bar + a gutter pencil), never
+   inserted, so hovering a block never reflows the text you are reading. */
+.md-editable { position: relative; border-radius: 6px; }
+.mdview:not(.editing) .md-editable { cursor: text; }
+.mdview:not(.editing) .md-editable:hover {
+  background: var(--coral-soft); box-shadow: inset 3px 0 0 var(--coral);
+}
+.mdview:not(.editing) .md-editable::after {
+  content: "✎"; position: absolute; left: -26px; top: 0.15em;
+  color: var(--coral); opacity: 0; font-size: 0.85em;
+  pointer-events: none; transition: opacity 0.1s;
+}
+.mdview:not(.editing) .md-editable:hover::after { opacity: 0.75; }
+
+/* The open block, swapped to its raw Markdown source. */
+.md-blockedit { margin: 0 0 0.9em; }
+.md-blockedit-ta {
+  width: 100%; box-sizing: border-box; display: block; resize: none; overflow: hidden;
+  font-family: var(--mono-font); font-size: 0.9em; line-height: 1.6; min-height: 1.6em;
+  color: var(--ink); background: var(--panel);
+  border: 1px solid var(--coral); border-radius: 8px; padding: 10px 12px; outline: none;
+}
+.md-blockedit-hint {
+  margin-top: 4px; font-family: var(--ui-font); font-size: 11px; color: var(--slate);
+}
+.md-blockedit-hint b { font-weight: 600; color: var(--ink); }

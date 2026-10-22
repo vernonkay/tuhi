@@ -1,4 +1,4 @@
-import { createElement, Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { cloneElement, createElement, Fragment, isValidElement, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
@@ -94,6 +94,8 @@ interface MdBlock {
   end_line: number;
   inlines: MdRun[];
   raw: string;
+  /** The block's verbatim source lines, for edit-in-place (mirror of Rust `source`). */
+  source: string;
 }
 
 /** Mirror of the Rust `DirEntry` (one file-tree row). */
@@ -337,6 +339,13 @@ function App() {
   // Live (hybrid) Markdown preview.
   const [livePreview, setLivePreview] = useState(false);
   const [blocks, setBlocks] = useState<MdBlock[]>([]);
+  // Edit-in-place: the index of the block currently open as raw source (or null).
+  // The ref mirrors it so blur/commit handlers read a synchronous value, and the
+  // skip flag lets Esc cancel without the imminent blur committing.
+  const [editBlock, setEditBlock] = useState<number | null>(null);
+  const editBlockRef = useRef<number | null>(null);
+  const editAreaRef = useRef<HTMLTextAreaElement>(null);
+  const skipCommitRef = useRef(false);
   const [filterOpen, setFilterOpen] = useState(false);
   const [filterQuery, setFilterQuery] = useState("");
   const [filterMatches, setFilterMatches] = useState<FilterMatch[]>([]);
@@ -728,6 +737,13 @@ function App() {
     else setBlocks([]);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [showLive, activeTabId, meta?.path, meta?.char_count, refreshBlocks]);
+
+  // Close any open block editor when the preview is hidden or the file/tab changes,
+  // so a stale block index can't survive into a different document.
+  useEffect(() => {
+    setEditBlock(null);
+    editBlockRef.current = null;
+  }, [showLive, activeTabId, meta?.path]);
 
   const ensureCaretVisible = useCallback((line: number) => {
     const el = scrollerRef.current;
@@ -1892,6 +1908,78 @@ function App() {
     }
   }
 
+  // ---- edit-in-place (hybrid): click a rendered block to open its raw source ----
+  const autosizeEdit = (ta: HTMLTextAreaElement) => {
+    ta.style.height = "auto";
+    ta.style.height = `${ta.scrollHeight}px`;
+  };
+
+  // The textarea is seeded with the block's source minus its one trailing newline
+  // (so no dangling blank line); Rust restores the terminator on write-back.
+  const editSeed = (b: MdBlock) => b.source.replace(/\n$/, "");
+
+  const beginEdit = (i: number) => {
+    if (!showLive || i < 0 || i >= blocks.length) return;
+    skipCommitRef.current = false;
+    editBlockRef.current = i;
+    setEditBlock(i);
+    // Focus, size and place the caret at the end once the textarea has mounted
+    // (same deferred-focus pattern as the go-to-line and find inputs).
+    setTimeout(() => {
+      const ta = editAreaRef.current;
+      if (!ta) return;
+      ta.focus();
+      autosizeEdit(ta);
+      const n = ta.value.length;
+      ta.setSelectionRange(n, n);
+    }, 0);
+  };
+
+  const cancelEdit = () => {
+    skipCommitRef.current = true; // the blur that follows must not commit
+    editBlockRef.current = null;
+    setEditBlock(null);
+  };
+
+  const commitEdit = async (value: string) => {
+    const i = editBlockRef.current;
+    if (i == null) return;
+    const b = blocks[i];
+    editBlockRef.current = null; // guard re-entry (the blur after Ctrl+Enter)
+    setEditBlock(null);
+    if (!b || value === editSeed(b)) return; // unchanged: skip the round-trip
+    try {
+      const m = await invoke<DocumentMeta>("replace_block", {
+        startLine: b.start_line,
+        endLine: b.end_line,
+        text: value,
+      });
+      setMeta(m); // the char_count change re-parses the blocks (effect above)
+    } catch (e) {
+      console.error("replace_block failed", e);
+    }
+  };
+
+  const onBlockEditKey = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key === "Escape") {
+      e.preventDefault();
+      e.stopPropagation();
+      cancelEdit();
+    } else if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+      e.preventDefault();
+      void commitEdit(e.currentTarget.value);
+    }
+    // Plain Enter and everything else stay in the textarea (a block may be multi-line).
+  };
+
+  const onBlockEditBlur = (e: React.FocusEvent<HTMLTextAreaElement>) => {
+    if (skipCommitRef.current) {
+      skipCommitRef.current = false;
+      return;
+    }
+    void commitEdit(e.currentTarget.value);
+  };
+
   // ---- live Markdown preview rendering ----
   const renderInline = (runs: MdRun[]): React.ReactNode =>
     runs.map((r, i) => {
@@ -1948,6 +2036,58 @@ function App() {
       default:
         return null;
     }
+  };
+
+  // Wrap a rendered block so it is clickable-to-edit, or render the open block as a
+  // raw-source textarea in its place. Tagging with `data-mdi` lets one delegated
+  // click handler on the container open the right block (no per-element listeners).
+  const renderBlockEditable = (b: MdBlock, i: number): React.ReactNode => {
+    if (editBlock === i) {
+      return (
+        <div key={i} className="md-blockedit">
+          <textarea
+            ref={editAreaRef}
+            className="md-blockedit-ta"
+            defaultValue={editSeed(b)}
+            spellCheck={false}
+            onKeyDown={onBlockEditKey}
+            onBlur={onBlockEditBlur}
+            onInput={(e) => autosizeEdit(e.currentTarget)}
+          />
+          <div className="md-blockedit-hint">
+            <b>{combo("Enter")}</b> save · <b>Esc</b> cancel
+          </div>
+        </div>
+      );
+    }
+    const el = renderBlock(b, i);
+    if (!isValidElement(el)) return el;
+    const prevCls = (el.props as { className?: string }).className ?? "";
+    return cloneElement(el as React.ReactElement<{ className?: string; "data-mdi"?: number }>, {
+      className: `${prevCls} md-editable`.trim(),
+      "data-mdi": i,
+    });
+  };
+
+  // One delegated handler for the whole preview: commit an open block when the click
+  // lands outside it (click-away saves), else open the clicked block for editing.
+  // A link click or an active text selection (reading-mode copy) is left alone.
+  const onPreviewClick = (e: React.MouseEvent<HTMLDivElement>) => {
+    const target = e.target as HTMLElement;
+    if (target.closest(".md-blockedit")) return; // clicks inside the open editor
+    if (editBlockRef.current != null) {
+      const ta = editAreaRef.current;
+      if (ta) void commitEdit(ta.value);
+      else cancelEdit();
+      return;
+    }
+    if (target.closest("a")) return;
+    const sel = window.getSelection();
+    if (sel && !sel.isCollapsed) return;
+    const host = target.closest("[data-mdi]") as HTMLElement | null;
+    if (!host) return;
+    const i = Number(host.getAttribute("data-mdi"));
+    if (Number.isInteger(i)) beginEdit(i);
   };
 
   // ---- render-time helpers for the Studio panels ----
@@ -2343,10 +2483,10 @@ function App() {
 
       <div className="workarea">
       {showLive ? (
-      <div className="mdview" tabIndex={0}>
-        <div className="mdview-inner">
+      <div className={`mdview${editBlock != null ? " editing" : ""}`} tabIndex={0}>
+        <div className="mdview-inner" onClick={onPreviewClick}>
           {blocks.length
-            ? blocks.map(renderBlock)
+            ? blocks.map(renderBlockEditable)
             : <p className="md-empty">This document is empty.</p>}
         </div>
       </div>

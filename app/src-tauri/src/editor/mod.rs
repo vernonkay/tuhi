@@ -208,6 +208,19 @@ pub trait Buffer: Send {
     fn replace_document(&mut self, _text: &str) -> Result<DocumentMeta, EditorError> {
         Err(EditorError::ReadOnly)
     }
+    /// Replace the source line range `[start_line, end_line)` with `text`, in one
+    /// undoable step. Backs the edit-in-place hybrid: a rendered Markdown block is
+    /// swapped to its raw source, edited, and written back by its line span. The
+    /// replacement's trailing newline is normalized to match the range's, so block
+    /// separation is preserved. Read-only engines refuse.
+    fn replace_line_range(
+        &mut self,
+        _start_line: usize,
+        _end_line: usize,
+        _text: &str,
+    ) -> Result<DocumentMeta, EditorError> {
+        Err(EditorError::ReadOnly)
+    }
     /// Lines matching `query` (as a regex), for the non-destructive filter view.
     /// Capped at [`MAX_FILTER_MATCHES`]. Default: no matches.
     fn filter(
@@ -924,6 +937,57 @@ impl Buffer for RopeBuffer {
         Ok(self.make_meta())
     }
 
+    fn replace_line_range(
+        &mut self,
+        start_line: usize,
+        end_line: usize,
+        text: &str,
+    ) -> Result<DocumentMeta, EditorError> {
+        let total_lines = self.rope.len_lines();
+        let n = self.rope.len_chars();
+        // Line starts in char space; a line index past the end maps to the doc end,
+        // so the final block (whose `end_line` is one past the last line) is covered.
+        let start = if start_line >= total_lines {
+            n
+        } else {
+            self.rope.line_to_char(start_line)
+        };
+        let end = if end_line >= total_lines {
+            n
+        } else {
+            self.rope.line_to_char(end_line)
+        };
+        if start > end {
+            return Err(EditorError::InvalidRange { start, end });
+        }
+        // Normalize the terminating newline to match the range being replaced, so the
+        // block stays separated from the next (or stays unterminated at end-of-file).
+        // Internal newlines in `text` are untouched, so an edit may split one block
+        // into several; the next parse re-derives the spans.
+        let orig_ends_nl = end > start && self.rope.char(end - 1) == '\n';
+        let body = text.trim_end_matches('\n');
+        let replacement = if orig_ends_nl {
+            format!("{body}\n")
+        } else {
+            body.to_string()
+        };
+        let removed = self.rope.slice(start..end).to_string();
+        if removed == replacement {
+            return Ok(self.make_meta());
+        }
+        self.rope.remove(start..end);
+        self.rope.insert(start, &replacement);
+        self.dirty = true;
+        self.redo_stack.clear();
+        self.push_undo(Change {
+            at: start,
+            removed,
+            inserted: replacement,
+        });
+        self.rehighlight();
+        Ok(self.make_meta())
+    }
+
     fn filter(
         &self,
         query: &str,
@@ -1301,6 +1365,25 @@ pub async fn markdown_blocks(
         .map_err(|e| EditorError::Other(format!("markdown parse failed: {e}")))
 }
 
+/// Write an edited Markdown block back to the buffer by its source line span, in one
+/// undoable step, for the edit-in-place hybrid. `end_line` is exclusive (the block's
+/// `end_line` from `markdown_blocks`). Returns the new document meta so the UI can
+/// refresh and re-parse. Fails on the read-only large-file engine.
+#[tauri::command]
+pub fn replace_block(
+    start_line: usize,
+    end_line: usize,
+    text: String,
+    state: State<EditorState>,
+) -> Result<DocumentMeta, EditorError> {
+    state
+        .0
+        .lock()
+        .map_err(|_| EditorError::LockPoisoned)?
+        .active_buffer_mut()?
+        .replace_line_range(start_line, end_line, &text)
+}
+
 #[derive(Serialize)]
 pub struct ReplaceResult {
     pub meta: DocumentMeta,
@@ -1478,6 +1561,39 @@ mod tests {
         let after_delete = b.delete(0, 1).unwrap();
         assert!(after_delete.dirty);
         assert_eq!(b.viewport(0, 1).unwrap()[0].text, "bc");
+    }
+
+    #[test]
+    fn replace_line_range_rewrites_a_block_and_keeps_separation() {
+        let mut b = RopeBuffer::default();
+        b.insert(0, "# Title\n\nold paragraph.\n\n## End\n")
+            .unwrap();
+        // The paragraph spans line 2 (end exclusive 3). Rewrite it.
+        b.replace_line_range(2, 3, "new paragraph text.").unwrap();
+        assert_eq!(b.text(), "# Title\n\nnew paragraph text.\n\n## End\n");
+        // One undo step restores the whole original document.
+        let caret = b.undo().unwrap();
+        assert!(caret.is_some());
+        assert_eq!(b.text(), "# Title\n\nold paragraph.\n\n## End\n");
+    }
+
+    #[test]
+    fn replace_line_range_can_split_one_block_into_several() {
+        let mut b = RopeBuffer::default();
+        b.insert(0, "para one.\n").unwrap();
+        // Replacing with text that contains a blank line yields two blocks worth of
+        // source; the trailing newline is normalized to the one being replaced.
+        b.replace_line_range(0, 1, "para one.\n\n## A heading")
+            .unwrap();
+        assert_eq!(b.text(), "para one.\n\n## A heading\n");
+    }
+
+    #[test]
+    fn replace_line_range_at_eof_without_newline() {
+        let mut b = RopeBuffer::default();
+        b.insert(0, "# Title\n\nlast").unwrap(); // no trailing newline
+        b.replace_line_range(2, 3, "edited last").unwrap();
+        assert_eq!(b.text(), "# Title\n\nedited last");
     }
 
     #[test]
