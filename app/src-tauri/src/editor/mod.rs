@@ -20,13 +20,14 @@ use std::io::{self, BufWriter, Write};
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
-use tauri::State;
+use tauri::{Manager, State};
 
 mod encoding;
 mod error;
 mod highlight;
 mod markdown;
 mod mmapbuf;
+mod recovery;
 mod search;
 use encoding::Encoding;
 use error::EditorError;
@@ -253,6 +254,17 @@ struct Tab {
     id: u32,
     path: Option<String>,
     buffer: Box<dyn Buffer>,
+    /// Stable id for this tab's crash-recovery snapshot (unique across sessions).
+    recovery_id: String,
+}
+
+/// A recovery-snapshot id for a new tab, unique across sessions (pid + nanos + tab id).
+fn gen_recovery_id(tab_id: u32) -> String {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!("{}-{}-{}", std::process::id(), nanos, tab_id)
 }
 
 /// Summary of one tab for the UI's tab strip.
@@ -414,6 +426,31 @@ fn is_markdown_ext(ext: &str) -> bool {
 }
 
 impl RopeBuffer {
+    /// Build a buffer from recovered text: the unsaved content, its original path, marked
+    /// dirty (it has never been written to that path in this session). Used to restore a
+    /// crash-recovery snapshot without reading the on-disk file.
+    fn from_text(text: &str, path: &str, dark: bool) -> Self {
+        let ext = std::path::Path::new(path)
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_string();
+        let mut b = RopeBuffer {
+            rope: Rope::from_str(text),
+            path: if path.is_empty() {
+                None
+            } else {
+                Some(PathBuf::from(path))
+            },
+            dirty: true,
+            ext,
+            dark,
+            ..Default::default()
+        };
+        b.rehighlight();
+        b
+    }
+
     fn make_meta(&self) -> DocumentMeta {
         DocumentMeta {
             path: self.path.as_ref().map(|p| p.display().to_string()),
@@ -1174,6 +1211,7 @@ pub async fn open_document(
         id,
         path: Some(path),
         buffer,
+        recovery_id: gen_recovery_id(id),
     });
     reg.active = Some(id);
     Ok(reg.tabs_state())
@@ -1200,8 +1238,20 @@ pub fn switch_tab(id: u32, state: State<EditorState>) -> Result<TabsState, Edito
 }
 
 #[tauri::command]
-pub fn close_tab(id: u32, state: State<EditorState>) -> Result<TabsState, EditorError> {
+pub fn close_tab(
+    id: u32,
+    app: tauri::AppHandle,
+    state: State<EditorState>,
+) -> Result<TabsState, EditorError> {
     let mut reg = state.0.lock().map_err(|_| EditorError::LockPoisoned)?;
+    // Capture the closing tab's recovery id so its snapshot can be removed — once the tab
+    // is gone from the list, `sync_recovery` can no longer clean it, so it would otherwise
+    // resurrect on next launch.
+    let closed_recovery_id = reg
+        .tabs
+        .iter()
+        .find(|t| t.id == id)
+        .map(|t| t.recovery_id.clone());
     if let Some(pos) = reg.tabs.iter().position(|t| t.id == id) {
         reg.tabs.remove(pos);
         if reg.active == Some(id) {
@@ -1213,7 +1263,128 @@ pub fn close_tab(id: u32, state: State<EditorState>) -> Result<TabsState, Editor
             reg.active = next;
         }
     }
+    drop(reg);
+    if let Some(rid) = closed_recovery_id
+        && let Ok(base) = app.path().app_data_dir()
+        && let Ok(dir) = recovery::recovery_dir(&base)
+    {
+        recovery::remove(&dir, &rid);
+    }
+    reg_tabs_state_after_close(&state)
+}
+
+/// Re-lock and return the tab state after `close_tab` released the lock to do file IO.
+fn reg_tabs_state_after_close(state: &State<EditorState>) -> Result<TabsState, EditorError> {
+    Ok(state
+        .0
+        .lock()
+        .map_err(|_| EditorError::LockPoisoned)?
+        .tabs_state())
+}
+
+/// The app-data recovery directory, created if missing.
+fn recovery_dir(app: &tauri::AppHandle) -> Result<std::path::PathBuf, EditorError> {
+    let base = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| EditorError::Other(format!("no app-data directory: {e}")))?;
+    Ok(recovery::recovery_dir(&base)?)
+}
+
+/// Snapshot every dirty editable buffer to the recovery journal, and remove the snapshot
+/// of any tab that is now clean. Called (debounced) after edits and after a save. Async
+/// with the file IO on a blocking worker: the buffers' text is cloned under the lock (a
+/// consistent point-in-time copy) and then written off-lock, so snapshotting never stalls
+/// editing.
+#[tauri::command]
+pub async fn sync_recovery(
+    app: tauri::AppHandle,
+    state: State<'_, EditorState>,
+) -> Result<(), EditorError> {
+    let dir = recovery_dir(&app)?;
+    // (recovery_id, path, Some(text) if dirty & editable else None)
+    let jobs: Vec<(String, Option<String>, Option<String>)> = {
+        let reg = state.0.lock().map_err(|_| EditorError::LockPoisoned)?;
+        reg.tabs
+            .iter()
+            .map(|t| {
+                let m = t.buffer.meta();
+                let text = if m.dirty && !m.readonly {
+                    Some(t.buffer.text())
+                } else {
+                    None
+                };
+                (t.recovery_id.clone(), t.path.clone(), text)
+            })
+            .collect()
+    };
+    tauri::async_runtime::spawn_blocking(move || {
+        for (id, path, text) in jobs {
+            match text {
+                Some(t) => {
+                    let _ = recovery::write(&dir, &id, path.as_deref(), &t);
+                }
+                None => recovery::remove(&dir, &id),
+            }
+        }
+    })
+    .await
+    .map_err(|e| EditorError::Other(format!("recovery sync failed: {e}")))?;
+    Ok(())
+}
+
+/// Leftover recovery snapshots (newest first), for the startup recovery prompt. Called on
+/// launch before any new snapshot is written, so it returns only the previous session's.
+#[tauri::command]
+pub fn list_recovery(app: tauri::AppHandle) -> Result<Vec<recovery::RecoveryMeta>, EditorError> {
+    Ok(recovery::list(&recovery_dir(&app)?))
+}
+
+/// Restore a recovery snapshot into a new (dirty) tab, keeping its original path and its
+/// recovery id, so the snapshot persists until the restored buffer is saved. If a tab for
+/// the same path is already open, just focus it.
+#[tauri::command]
+pub fn restore_recovery(
+    id: String,
+    dark: bool,
+    app: tauri::AppHandle,
+    state: State<EditorState>,
+) -> Result<TabsState, EditorError> {
+    let dir = recovery_dir(&app)?;
+    let snap = recovery::read(&dir, &id)?;
+    let mut reg = state.0.lock().map_err(|_| EditorError::LockPoisoned)?;
+    if let Some(p) = snap.path.as_deref()
+        && let Some(tid) = reg
+            .tabs
+            .iter()
+            .find(|t| t.path.as_deref() == Some(p))
+            .map(|t| t.id)
+    {
+        reg.active = Some(tid);
+        return Ok(reg.tabs_state());
+    }
+    let buffer: Box<dyn Buffer> = Box::new(RopeBuffer::from_text(
+        &snap.text,
+        snap.path.as_deref().unwrap_or(""),
+        dark,
+    ));
+    let tid = reg.next_id;
+    reg.next_id += 1;
+    reg.tabs.push(Tab {
+        id: tid,
+        path: snap.path,
+        buffer,
+        recovery_id: id,
+    });
+    reg.active = Some(tid);
     Ok(reg.tabs_state())
+}
+
+/// Discard a recovery snapshot (the user chose not to restore it).
+#[tauri::command]
+pub fn discard_recovery(id: String, app: tauri::AppHandle) -> Result<(), EditorError> {
+    recovery::remove(&recovery_dir(&app)?, &id);
+    Ok(())
 }
 
 #[tauri::command]
