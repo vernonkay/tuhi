@@ -6,6 +6,8 @@ import { readText, writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import hljs from "highlight.js/lib/common";
 import mermaid from "mermaid";
+import katex from "katex";
+import "katex/dist/katex.min.css";
 import "./App.css";
 
 /** Mirror of the Rust `DocumentMeta` (editor/mod.rs). */
@@ -82,6 +84,9 @@ interface MdRun {
   code: boolean;
   strike: boolean;
   href: string | null;
+  /** Math run: `text` is TeX, rendered with KaTeX; `display` = block math. */
+  math?: boolean;
+  display?: boolean;
 }
 
 /** Structured table data (mirror of Rust `TableData`). */
@@ -2220,6 +2225,23 @@ function App() {
   // ---- live Markdown preview rendering ----
   const renderInline = (runs: MdRun[]): React.ReactNode =>
     runs.map((r, i) => {
+      if (r.math) {
+        let html = "";
+        try {
+          html = katex.renderToString(r.text, { displayMode: !!r.display, throwOnError: false });
+        } catch {
+          html = "";
+        }
+        return html ? (
+          <span
+            key={i}
+            className={r.display ? "md-math md-math-display" : "md-math"}
+            dangerouslySetInnerHTML={{ __html: html }}
+          />
+        ) : (
+          <code key={i} className="md-code">{r.text}</code>
+        );
+      }
       let el: React.ReactNode = r.code ? <code className="md-code">{r.text}</code> : r.text;
       if (r.strike) el = <s>{el}</s>;
       if (r.italic) el = <em>{el}</em>;

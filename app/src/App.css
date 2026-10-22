@@ -866,6 +866,9 @@ html, body, #root {
 .md-mermaid { display: flex; justify-content: center; overflow-x: auto; }
 .md-mermaid svg { max-width: 100%; height: auto; }
 .md-mermaid-pending { color: var(--slate); font-style: italic; font-size: 13px; padding: 14px; justify-content: flex-start; }
+
+/* KaTeX math. Inline math flows with the text; display math centres as its own line. */
+.md-math-display { display: block; margin: 0.7em 0; text-align: center; overflow-x: auto; overflow-y: hidden; }
 .md-raw {
   font-family: var(--mono-font); font-size: 0.84em; background: var(--panel);
   border: 1px dashed var(--border); border-radius: 8px; padding: 18px 14px 12px;

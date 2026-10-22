@@ -24,6 +24,10 @@ pub struct InlineRun {
     pub strike: bool,
     /// Link target when this run is (part of) a link, else `None`.
     pub href: Option<String>,
+    /// This run is a math expression (`text` is the TeX source, rendered with KaTeX).
+    pub math: bool,
+    /// Display (block) math (`$$…$$`) rather than inline (`$…$`); only with `math`.
+    pub display: bool,
 }
 
 /// A rendered table: per-column alignment plus header and body cells, each cell its own
@@ -141,6 +145,7 @@ pub fn parse_blocks(text: &str) -> Vec<Block> {
     opts.insert(Options::ENABLE_TABLES);
     opts.insert(Options::ENABLE_STRIKETHROUGH);
     opts.insert(Options::ENABLE_TASKLISTS);
+    opts.insert(Options::ENABLE_MATH);
 
     let mut blocks: Vec<Block> = Vec::new();
     let mut pending: Option<Pending> = None;
@@ -179,6 +184,8 @@ pub fn parse_blocks(text: &str) -> Vec<Block> {
             code,
             strike,
             href: href.clone(),
+            math: false,
+            display: false,
         });
     };
 
@@ -396,6 +403,33 @@ pub fn parse_blocks(text: &str) -> Vec<Block> {
                         strike > 0,
                         &href,
                     );
+                }
+            }
+            Event::InlineMath(t) => {
+                let run = InlineRun {
+                    text: t.to_string(),
+                    math: true,
+                    ..Default::default()
+                };
+                if let Some(p) = pending.as_mut() {
+                    p.end_byte = range.end;
+                    p.inlines.push(run);
+                } else if let Some(tb) = table.as_mut() {
+                    tb.cur_cell.push(run);
+                }
+            }
+            Event::DisplayMath(t) => {
+                let run = InlineRun {
+                    text: t.to_string(),
+                    math: true,
+                    display: true,
+                    ..Default::default()
+                };
+                if let Some(p) = pending.as_mut() {
+                    p.end_byte = range.end;
+                    p.inlines.push(run);
+                } else if let Some(tb) = table.as_mut() {
+                    tb.cur_cell.push(run);
                 }
             }
             Event::SoftBreak | Event::HardBreak => {
@@ -652,6 +686,23 @@ mod tests {
         assert!(
             t.rows[0][1].iter().any(|r| r.text == "2" && r.bold),
             "bold cell content resolves"
+        );
+    }
+
+    #[test]
+    fn inline_and_display_math_resolve() {
+        let md = "Euler: $e^{i\\pi}+1=0$ is neat.\n\n$$\\int_0^1 x^2\\,dx$$\n";
+        let b = parse_blocks(md);
+        let runs: Vec<&InlineRun> = b.iter().flat_map(|bl| &bl.inlines).collect();
+        assert!(
+            runs.iter()
+                .any(|r| r.math && !r.display && r.text.contains("e^")),
+            "inline math captured"
+        );
+        assert!(
+            runs.iter()
+                .any(|r| r.math && r.display && r.text.contains("int")),
+            "display math captured"
         );
     }
 
