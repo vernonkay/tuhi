@@ -1387,6 +1387,27 @@ pub fn discard_recovery(id: String, app: tauri::AppHandle) -> Result<(), EditorE
     Ok(())
 }
 
+/// Ensure the welcome guide exists on disk and return its path, so the UI can open it as
+/// a normal editable document (first run and the "Open the welcome guide" command). The
+/// guide text is embedded in the binary (works in dev and bundled builds alike) and is
+/// written to the app-data dir only if missing, so a user's edits to their copy survive.
+#[tauri::command]
+pub fn ensure_welcome(app: tauri::AppHandle) -> Result<String, EditorError> {
+    let base = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| EditorError::Other(format!("no app-data directory: {e}")))?;
+    std::fs::create_dir_all(&base)?;
+    let path = base.join("WELCOME.md");
+    if !path.exists() {
+        std::fs::write(
+            &path,
+            include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../WELCOME.md")),
+        )?;
+    }
+    Ok(path.display().to_string())
+}
+
 #[tauri::command]
 pub fn get_viewport(
     start: usize,

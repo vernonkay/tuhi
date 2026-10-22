@@ -825,6 +825,50 @@ html, body, #root {
   overflow-x: auto; margin: 0 0 0.9em;
 }
 .md-codeblock code { white-space: pre; }
+
+/* Fenced-code syntax colours (highlight.js token classes), themed to the palette rather
+   than a bundled hljs theme. A few code-specific hues (string/number/function) get dark
+   overrides; keyword and comment reuse the brand tokens, which are already theme-aware. */
+.md-codeblock { --c-str: #1f8a5b; --c-num: #b5651d; --c-fn: #3156c7; }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .md-codeblock { --c-str: #4fd49a; --c-num: #d99a5b; --c-fn: #6a93f7; }
+}
+:root[data-theme="dark"] .md-codeblock { --c-str: #4fd49a; --c-num: #d99a5b; --c-fn: #6a93f7; }
+.md-codeblock .hljs-keyword,
+.md-codeblock .hljs-built_in,
+.md-codeblock .hljs-literal,
+.md-codeblock .hljs-type,
+.md-codeblock .hljs-selector-tag { color: var(--coral); }
+.md-codeblock .hljs-string,
+.md-codeblock .hljs-regexp,
+.md-codeblock .hljs-attr,
+.md-codeblock .hljs-symbol { color: var(--c-str); }
+.md-codeblock .hljs-comment,
+.md-codeblock .hljs-quote { color: var(--slate); font-style: italic; }
+.md-codeblock .hljs-number { color: var(--c-num); }
+.md-codeblock .hljs-title,
+.md-codeblock .hljs-title.function_,
+.md-codeblock .hljs-section,
+.md-codeblock .hljs-name { color: var(--c-fn); font-weight: 600; }
+.md-codeblock .hljs-meta { color: var(--slate); }
+
+/* Real Markdown tables (structured render). */
+.md-table-wrap { overflow-x: auto; margin: 0 0 0.9em; }
+.md-table { border-collapse: collapse; font-size: 0.92em; }
+.md-table th, .md-table td {
+  border: 1px solid var(--border); padding: 6px 12px; text-align: left; vertical-align: top;
+}
+.md-table thead th { background: var(--panel); font-weight: 600; color: var(--ink); }
+.md-table tbody tr:nth-child(even) td { background: var(--panel); }
+
+/* Mermaid diagrams. */
+.md-mermaid-wrap { margin: 0 0 0.9em; }
+.md-mermaid { display: flex; justify-content: center; overflow-x: auto; }
+.md-mermaid svg { max-width: 100%; height: auto; }
+.md-mermaid-pending { color: var(--slate); font-style: italic; font-size: 13px; padding: 14px; justify-content: flex-start; }
+
+/* KaTeX math. Inline math flows with the text; display math centres as its own line. */
+.md-math-display { display: block; margin: 0.7em 0; text-align: center; overflow-x: auto; overflow-y: hidden; }
 .md-raw {
   font-family: var(--mono-font); font-size: 0.84em; background: var(--panel);
   border: 1px dashed var(--border); border-radius: 8px; padding: 18px 14px 12px;
