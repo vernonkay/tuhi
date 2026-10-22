@@ -46,14 +46,37 @@ feature, then hardening and finish. (Target date: TBD.)
 3. **Markdown live preview** (the 0.2 headline) — Typora-style hybrid, Mermaid/KaTeX/
    tables, Pandoc export.
 4. **Crash-safe unsaved buffers + autosave** — never lose work.
-5. **Signed / notarised builds** — remove the SmartScreen/Gatekeeper friction for a public
-   1.0 (0.1.x ships unsigned).
+5. **Signed / notarised builds + in-app updater** — remove the SmartScreen/Gatekeeper
+   friction for a public 1.0 (0.1.x ships unsigned), and do the "new release available"
+   updater here too: the Tauri updater needs its own signing key and a release endpoint,
+   so it belongs with signing rather than as a separate half-measure (notify → download →
+   install, from GitHub releases).
 6. **UI design pass** — tidy the existing design (which is good but has rough edges) to a
    polished, Obsidian-quality feel.
 7. **Full keyboard command set** — every standard editor shortcut, so a keyboard-first
    user never reaches for the mouse: word-wise movement and selection
    (Ctrl/Ctrl+Shift+arrows), document and page jumps (Ctrl+Home/End, PageUp/Down, with
    Shift to extend), and delete-word (Ctrl+Backspace/Delete).
+
+## v1.0 release prep — the finish line
+
+Not features so much as the things a public 1.0 needs on the day:
+
+- **File-type associations** — register tuhi as a handler for `.md`/`.markdown`/`.txt`/
+  `.log` (and friends) in the installer bundle (`fileAssociations`), so "Open with → tuhi"
+  works. Modern Windows/macOS won't let an app silently claim *default*, so add a Settings
+  "Set as default for these types…" action that opens the OS default-apps UI, plus a
+  first-run nudge. Rides with the bundle/installer work (#5).
+- **Open-type guard** — don't render a binary file as garbage. Detect binary content
+  (NUL bytes / invalid-UTF-8 ratio in the first chunk) and gate it behind an
+  "open anyway?" prompt, with a configurable `alwaysText` / `neverOpen` extension list
+  on top for overrides. Content detection first, extension list second, so a `.log` or
+  an extensionless file still opens and a `.docx` (a ZIP) is caught.
+- **A proper README for first run** — what tuhi is and who it's for, install per OS, the
+  large-file and Markdown stories up front, the keyboard set, and a screenshot or two.
+  It's the first thing a new installer sees.
+- **A fresh demo GIF** — the current one predates the Twin-Gutters chrome, the big-file
+  verbs and Markdown mode; re-record once the feature set is frozen.
 
 ## Planned / under consideration
 
@@ -76,5 +99,11 @@ quietly block shippable work.
   the edges and never the edit model.
 - **A smarter outline for very large documents** — summarise/bucket huge flat heading
   lists instead of listing every one.
+- **Virtualized Markdown preview** — render only the blocks in view so the live preview
+  scales to huge documents and the current ~512 KB preview cap can be lifted (above it a
+  Markdown file opens as source today).
+- **Background opacity / window translucency** — an optional Settings slider for a
+  translucent window. Deferred from 1.0 (legibility and per-OS compositor quirks), but
+  the geeks love it, so it's on the list.
 - Modern multi-cursor, find-in-files, show-unprintable-characters.
 - Signed / notarised builds once there's traction (0.1.0 ships unsigned).

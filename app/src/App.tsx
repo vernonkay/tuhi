@@ -1,8 +1,9 @@
-import { createElement, Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { cloneElement, createElement, Fragment, isValidElement, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { readText, writeText } from "@tauri-apps/plugin-clipboard-manager";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import "./App.css";
 
 /** Mirror of the Rust `DocumentMeta` (editor/mod.rs). */
@@ -94,6 +95,8 @@ interface MdBlock {
   end_line: number;
   inlines: MdRun[];
   raw: string;
+  /** The block's verbatim source lines, for edit-in-place (mirror of Rust `source`). */
+  source: string;
 }
 
 /** Mirror of the Rust `DirEntry` (one file-tree row). */
@@ -238,6 +241,14 @@ const GUTTER = 64; // `.gutter` border-box width; its 12px padding-right sits IN
 // via `request_highlight` instead, and the outline built on open is kept as-is.
 const HIGHLIGHT_MAX_CHARS = 2 * 1024 * 1024;
 
+// Ceiling on the live Markdown preview, in characters. The preview itself is virtualized
+// (only on-screen blocks become DOM nodes), so block count no longer bounds it. What
+// remains is the one-time cost of parsing the whole document and transferring every block
+// across the Rust→JS boundary, which grows with size; above this a Markdown file opens in
+// the normal windowed source editor instead. (Lifting even this needs windowed parsing —
+// see the roadmap.) 5 MB comfortably covers large real documents, e.g. a 4 MB export.
+const MD_PREVIEW_MAX_CHARS = 5 * 1024 * 1024;
+
 /** Platform-appropriate shortcut label: "⌘O" on macOS, "Ctrl+O" elsewhere. */
 const IS_MAC =
   typeof navigator !== "undefined" && /Mac|iPhone|iPad|iPod/.test(navigator.platform || navigator.userAgent || "");
@@ -335,8 +346,18 @@ function App() {
   const [outlineQuery, setOutlineQuery] = useState("");
   const [outlineExpanded, setOutlineExpanded] = useState<Set<number>>(new Set());
   // Live (hybrid) Markdown preview.
-  const [livePreview, setLivePreview] = useState(false);
+  // A Markdown file opens in the rendered preview by default; this flips it to the
+  // raw whole-document source editor (the rail "Source" dot / palette command).
+  const [editSource, setEditSource] = useState(false);
   const [blocks, setBlocks] = useState<MdBlock[]>([]);
+  const [blocksLoading, setBlocksLoading] = useState(false);
+  // Edit-in-place: the index of the block currently open as raw source (or null).
+  // The ref mirrors it so blur/commit handlers read a synchronous value, and the
+  // skip flag lets Esc cancel without the imminent blur committing.
+  const [editBlock, setEditBlock] = useState<number | null>(null);
+  const editBlockRef = useRef<number | null>(null);
+  const editAreaRef = useRef<HTMLTextAreaElement>(null);
+  const skipCommitRef = useRef(false);
   const [filterOpen, setFilterOpen] = useState(false);
   const [filterQuery, setFilterQuery] = useState("");
   const [filterMatches, setFilterMatches] = useState<FilterMatch[]>([]);
@@ -388,11 +409,16 @@ function App() {
   }, []);
 
   const refreshBlocks = useCallback(async () => {
+    // Keep the current blocks on screen while the (off-thread) parse runs, so an edit
+    // re-parse doesn't flash; the loading flag suppresses the "empty" message meanwhile.
+    setBlocksLoading(true);
     try {
       setBlocks(await invoke<MdBlock[]>("markdown_blocks"));
     } catch (e) {
       setError(String(e));
       setBlocks([]);
+    } finally {
+      setBlocksLoading(false);
     }
   }, []);
 
@@ -581,6 +607,9 @@ function App() {
   const caretRef = useRef<Caret | null>(null);
   const anchorRef = useRef<number | null>(null);
   const charCountRef = useRef(0);
+  // Whether the active file is Markdown, read synchronously by the viewport-highlight
+  // decision (Markdown source is coloured lazily, one visible window at a time).
+  const isMarkdownRef = useRef(false);
   const typeBufRef = useRef(""); // characters typed but not yet sent to Rust
   const typeAtRef = useRef(0); // char index where the buffered run begins
   const flushRaf = useRef<number | null>(null); // pending requestAnimationFrame handle
@@ -594,9 +623,29 @@ function App() {
   const lineCount = meta?.line_count ?? 0;
   const readonly = meta?.readonly ?? false;
   const isMarkdown = !!meta?.path && /\.(md|markdown|mdx)$/i.test(meta.path);
-  // Live preview renders only for an editable Markdown file; non-markdown or large
-  // read-only files keep the plain editor even if the toggle is left on.
-  const showLive = livePreview && !!meta && isMarkdown && !readonly;
+  // The preview renders eagerly, so it is only offered below the size cap; a larger
+  // Markdown file opens in the source editor regardless of the toggle (see the cap note).
+  const mdPreviewable = isMarkdown && !readonly && (meta?.char_count ?? 0) <= MD_PREVIEW_MAX_CHARS;
+  // The rendered preview is the default view for a previewable Markdown file; the
+  // "Source" toggle drops it to the raw whole-document editor. Non-markdown, large or
+  // read-only files always use the plain editor (there is nothing to render, or it would
+  // not scale).
+  const showLive = !editSource && !!meta && mdPreviewable;
+
+  // Virtualize the preview: only the blocks on screen become DOM nodes, so the preview
+  // scales to any block count (the char cap bounds parse/transfer cost, not render). Rows
+  // have variable, dynamic heights (an opened block editor is taller), so each row is
+  // measured; `display: flow-root` on the row (CSS) contains the block's margins into the
+  // measured height. paddingStart/End give the top/bottom breathing room.
+  const mdScrollRef = useRef<HTMLDivElement>(null);
+  const mdVirtualizer = useVirtualizer({
+    count: showLive ? blocks.length : 0,
+    getScrollElement: () => mdScrollRef.current,
+    estimateSize: () => 36,
+    overscan: 10,
+    paddingStart: 32,
+    paddingEnd: 80,
+  });
 
   useEffect(() => {
     const measure = () => {
@@ -690,8 +739,10 @@ function App() {
         setRangeStart(start);
         rangeStartRef.current = start;
         setWindowBase(base);
-        // Large files carry no eager highlights; colour the visible window on demand.
-        if (charCountRef.current > HIGHLIGHT_MAX_CHARS) {
+        // Colour the visible window on demand for files with no eager whole-document
+        // highlights: large files (over the cap) and Markdown at any size (its source
+        // view is never whole-document highlighted).
+        if (charCountRef.current > HIGHLIGHT_MAX_CHARS || isMarkdownRef.current) {
           requestViewportHighlight(start, got.length);
         }
       } catch (e) {
@@ -710,8 +761,15 @@ function App() {
   }, [meta, fetchViewport]);
 
   useEffect(() => {
+    isMarkdownRef.current = isMarkdown;
+  }, [isMarkdown]);
+
+  // Fetch the source viewport on open AND when toggling out of preview into source: the
+  // scroller isn't mounted while the preview shows, so without the `showLive` dependency
+  // the first source render would be stale/empty until a scroll (the toggle "stutter").
+  useEffect(() => {
     recomputeViewport();
-  }, [meta, recomputeViewport]);
+  }, [meta, recomputeViewport, showLive]);
 
   // Refresh the outline when the active document changes (open/switch/close); edits
   // refresh it via the debounced rehighlight below.
@@ -728,6 +786,16 @@ function App() {
     else setBlocks([]);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [showLive, activeTabId, meta?.path, meta?.char_count, refreshBlocks]);
+
+  // Close any open block editor and drop stale blocks when the preview is hidden or the
+  // file/tab changes, so a stale block index — or the previous document's rendered
+  // content — can't survive into a different document. (Edit re-parses keep their blocks
+  // on screen: this is keyed on the file/view, not on char_count.)
+  useEffect(() => {
+    setEditBlock(null);
+    editBlockRef.current = null;
+    setBlocks([]);
+  }, [showLive, activeTabId, meta?.path]);
 
   const ensureCaretVisible = useCallback((line: number) => {
     const el = scrollerRef.current;
@@ -941,12 +1009,17 @@ function App() {
     setBusy(true);
     try {
       const dark = darkRef.current;
-      // Open each file as its own tab; the last one ends up active.
-      let last: TabsState | null = null;
-      for (const p of paths) {
-        last = await invoke<TabsState>("open_document", { path: p, dark });
+      // Open each file as its own tab. `open_document` is async (it builds the buffer on
+      // a worker thread), so open all but the last in parallel — their highlights run on
+      // separate threads, cutting the wall-clock of a multi-file open and keeping the UI
+      // responsive — then open the last one so it ends up active.
+      if (paths.length > 1) {
+        await Promise.all(
+          paths.slice(0, -1).map((p) => invoke<TabsState>("open_document", { path: p, dark })),
+        );
       }
-      if (last) await applyTabsState(last);
+      const last = await invoke<TabsState>("open_document", { path: paths[paths.length - 1], dark });
+      await applyTabsState(last);
       void revealInTree(paths[paths.length - 1]);
       paths.forEach((p) => remember(p, "file"));
     } catch (e) {
@@ -1892,6 +1965,78 @@ function App() {
     }
   }
 
+  // ---- edit-in-place (hybrid): click a rendered block to open its raw source ----
+  const autosizeEdit = (ta: HTMLTextAreaElement) => {
+    ta.style.height = "auto";
+    ta.style.height = `${ta.scrollHeight}px`;
+  };
+
+  // The textarea is seeded with the block's source minus its one trailing newline
+  // (so no dangling blank line); Rust restores the terminator on write-back.
+  const editSeed = (b: MdBlock) => b.source.replace(/\n$/, "");
+
+  const beginEdit = (i: number) => {
+    if (!showLive || i < 0 || i >= blocks.length) return;
+    skipCommitRef.current = false;
+    editBlockRef.current = i;
+    setEditBlock(i);
+    // Focus, size and place the caret at the end once the textarea has mounted
+    // (same deferred-focus pattern as the go-to-line and find inputs).
+    setTimeout(() => {
+      const ta = editAreaRef.current;
+      if (!ta) return;
+      ta.focus();
+      autosizeEdit(ta);
+      const n = ta.value.length;
+      ta.setSelectionRange(n, n);
+    }, 0);
+  };
+
+  const cancelEdit = () => {
+    skipCommitRef.current = true; // the blur that follows must not commit
+    editBlockRef.current = null;
+    setEditBlock(null);
+  };
+
+  const commitEdit = async (value: string) => {
+    const i = editBlockRef.current;
+    if (i == null) return;
+    const b = blocks[i];
+    editBlockRef.current = null; // guard re-entry (the blur after Ctrl+Enter)
+    setEditBlock(null);
+    if (!b || value === editSeed(b)) return; // unchanged: skip the round-trip
+    try {
+      const m = await invoke<DocumentMeta>("replace_block", {
+        startLine: b.start_line,
+        endLine: b.end_line,
+        text: value,
+      });
+      setMeta(m); // the char_count change re-parses the blocks (effect above)
+    } catch (e) {
+      console.error("replace_block failed", e);
+    }
+  };
+
+  const onBlockEditKey = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key === "Escape") {
+      e.preventDefault();
+      e.stopPropagation();
+      cancelEdit();
+    } else if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+      e.preventDefault();
+      void commitEdit(e.currentTarget.value);
+    }
+    // Plain Enter and everything else stay in the textarea (a block may be multi-line).
+  };
+
+  const onBlockEditBlur = (e: React.FocusEvent<HTMLTextAreaElement>) => {
+    if (skipCommitRef.current) {
+      skipCommitRef.current = false;
+      return;
+    }
+    void commitEdit(e.currentTarget.value);
+  };
+
   // ---- live Markdown preview rendering ----
   const renderInline = (runs: MdRun[]): React.ReactNode =>
     runs.map((r, i) => {
@@ -1950,6 +2095,58 @@ function App() {
     }
   };
 
+  // Wrap a rendered block so it is clickable-to-edit, or render the open block as a
+  // raw-source textarea in its place. Tagging with `data-mdi` lets one delegated
+  // click handler on the container open the right block (no per-element listeners).
+  const renderBlockEditable = (b: MdBlock, i: number): React.ReactNode => {
+    if (editBlock === i) {
+      return (
+        <div key={i} className="md-blockedit">
+          <textarea
+            ref={editAreaRef}
+            className="md-blockedit-ta"
+            defaultValue={editSeed(b)}
+            spellCheck={false}
+            onKeyDown={onBlockEditKey}
+            onBlur={onBlockEditBlur}
+            onInput={(e) => autosizeEdit(e.currentTarget)}
+          />
+          <div className="md-blockedit-hint">
+            <b>{combo("Enter")}</b> save · <b>Esc</b> cancel
+          </div>
+        </div>
+      );
+    }
+    const el = renderBlock(b, i);
+    if (!isValidElement(el)) return el;
+    const prevCls = (el.props as { className?: string }).className ?? "";
+    return cloneElement(el as React.ReactElement<{ className?: string; "data-mdi"?: number }>, {
+      className: `${prevCls} md-editable`.trim(),
+      "data-mdi": i,
+    });
+  };
+
+  // One delegated handler for the whole preview: commit an open block when the click
+  // lands outside it (click-away saves), else open the clicked block for editing.
+  // A link click or an active text selection (reading-mode copy) is left alone.
+  const onPreviewClick = (e: React.MouseEvent<HTMLDivElement>) => {
+    const target = e.target as HTMLElement;
+    if (target.closest(".md-blockedit")) return; // clicks inside the open editor
+    if (editBlockRef.current != null) {
+      const ta = editAreaRef.current;
+      if (ta) void commitEdit(ta.value);
+      else cancelEdit();
+      return;
+    }
+    if (target.closest("a")) return;
+    const sel = window.getSelection();
+    if (sel && !sel.isCollapsed) return;
+    const host = target.closest("[data-mdi]") as HTMLElement | null;
+    if (!host) return;
+    const i = Number(host.getAttribute("data-mdi"));
+    if (Number.isInteger(i)) beginEdit(i);
+  };
+
   // ---- render-time helpers for the Studio panels ----
   const baseName = (p: string) => p.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || p;
 
@@ -1990,7 +2187,7 @@ function App() {
       ...(meta ? [{ label: "Save", hint: combo("S"), kind: C, run: () => void handleSave() }] : []),
       ...(meta ? [{ label: "Find in file…", hint: combo("F"), kind: C, run: () => openFind(false) }] : []),
       ...(meta ? [{ label: "Go to line…", hint: combo("G"), kind: C, run: () => { setGotoValue(""); setGotoOpen(true); setTimeout(() => gotoInputRef.current?.focus(), 0); } }] : []),
-      ...(meta && isMarkdown && !readonly ? [{ label: showLive ? "Hide live preview" : "Live preview (Markdown)", kind: C, run: () => setLivePreview((v) => !v) }] : []),
+      ...(meta && mdPreviewable ? [{ label: showLive ? "Edit Markdown source" : "Preview Markdown", kind: C, run: () => setEditSource((v) => !v) }] : []),
       ...(meta && !readonly ? [{ label: "Format JSON (pretty-print)", kind: C, run: () => void formatJson() }] : []),
       ...(meta ? [{ label: "Filter lines to view…", kind: C, run: () => openFilter() }] : []),
       ...(meta?.path ? [{ label: followOn ? "Stop following file" : "Follow file (tail)", kind: C, run: () => toggleFollow() }] : []),
@@ -2343,12 +2540,40 @@ function App() {
 
       <div className="workarea">
       {showLive ? (
-      <div className="mdview" tabIndex={0}>
-        <div className="mdview-inner">
-          {blocks.length
-            ? blocks.map(renderBlock)
-            : <p className="md-empty">This document is empty.</p>}
-        </div>
+      <div className={`mdview${editBlock != null ? " editing" : ""}`} ref={mdScrollRef} tabIndex={0}>
+        {blocks.length ? (
+          <div
+            className="mdview-inner"
+            onClick={onPreviewClick}
+            style={{ height: mdVirtualizer.getTotalSize(), position: "relative" }}
+          >
+            {mdVirtualizer.getVirtualItems().map((vi) => (
+              <div
+                key={vi.key}
+                data-index={vi.index}
+                ref={mdVirtualizer.measureElement}
+                className="md-vrow"
+                style={{
+                  position: "absolute",
+                  top: 0,
+                  left: 0,
+                  right: 0,
+                  transform: `translateY(${vi.start}px)`,
+                }}
+              >
+                {renderBlockEditable(blocks[vi.index], vi.index)}
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div className="mdview-inner">
+            {blocksLoading ? (
+              <p className="md-empty">Rendering…</p>
+            ) : (
+              <p className="md-empty">This document is empty.</p>
+            )}
+          </div>
+        )}
       </div>
       ) : (
       <div
@@ -2514,13 +2739,23 @@ function App() {
       <aside className="gut gut-r">
         <div className="gut-cap" />
         <button
-          className={`gut-dot-btn${showLive ? " on" : ""}`}
-          onClick={() => setLivePreview((v) => !v)}
-          disabled={!meta || !isMarkdown || readonly}
-          title={isMarkdown ? "Live preview" : "Live preview (Markdown files only)"}
+          className={`gut-dot-btn${editSource && mdPreviewable ? " on" : ""}`}
+          onClick={() => setEditSource((v) => !v)}
+          disabled={!meta || !mdPreviewable}
+          title={
+            !isMarkdown
+              ? "Source view (Markdown files preview by default)"
+              : readonly
+                ? "Preview unavailable for read-only files"
+                : !mdPreviewable
+                  ? "Preview unavailable for large Markdown files (opens as source)"
+                  : showLive
+                    ? "Edit source (whole document)"
+                    : "Back to preview"
+          }
         >
           <span className="gd" />
-          <span className="gd-label">Preview</span>
+          <span className="gd-label">Source</span>
         </button>
         <button
           className={`gut-dot-btn${leftPanel === "outline" ? " on" : ""}`}
