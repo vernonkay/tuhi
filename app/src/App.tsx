@@ -1,7 +1,7 @@
 import { cloneElement, createElement, Fragment, isValidElement, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
+import { ask, open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { readText, writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import "./App.css";
@@ -253,6 +253,57 @@ const MD_PREVIEW_MAX_CHARS = 5 * 1024 * 1024;
 const IS_MAC =
   typeof navigator !== "undefined" && /Mac|iPhone|iPad|iPod/.test(navigator.platform || navigator.userAgent || "");
 const combo = (key: string) => (IS_MAC ? `⌘${key}` : `Ctrl+${key}`);
+
+/** Mirror of the Rust `FileSniff`: whether a file looks binary, and a short reason. */
+interface FileSniff {
+  binary: boolean;
+  reason: string;
+}
+
+// Open-type guard overrides, per viewer, until the Settings panel manages them: file
+// extensions to always open as text (skip the binary check) or to always gate. Content
+// detection leads; these are overrides on top (see `shouldOpenAsText`).
+function loadOpenGuard(): { alwaysText: string[]; neverOpen: string[] } {
+  try {
+    const v = JSON.parse(localStorage.getItem("tuhi.openGuard") || "{}");
+    return {
+      alwaysText: Array.isArray(v.alwaysText) ? v.alwaysText : [],
+      neverOpen: Array.isArray(v.neverOpen) ? v.neverOpen : [],
+    };
+  } catch {
+    return { alwaysText: [], neverOpen: [] };
+  }
+}
+const extOf = (p: string) => p.split(/[\\/]/).pop()?.toLowerCase().split(".").slice(1).pop() ?? "";
+const nameOf = (p: string) => p.split(/[\\/]/).pop() || p;
+
+// Whether to open a file as text: immediately for text, or after the user confirms
+// "open anyway?" for one that looks binary (a `.docx`, an image, an executable). Content
+// detection via `sniff_file` leads; the `alwaysText` / `neverOpen` extension lists are
+// overrides. Returns false only when the user declines.
+async function shouldOpenAsText(path: string): Promise<boolean> {
+  const ext = extOf(path);
+  const { alwaysText, neverOpen } = loadOpenGuard();
+  if (ext && alwaysText.includes(ext)) return true;
+  if (ext && neverOpen.includes(ext)) {
+    return ask(`.${ext} files are set not to open as text. Open "${nameOf(path)}" anyway?`, {
+      title: "Open as text?",
+      kind: "warning",
+    });
+  }
+  try {
+    const sniff = await invoke<FileSniff>("sniff_file", { path });
+    if (sniff.binary) {
+      return ask(`"${nameOf(path)}" looks like a binary file (${sniff.reason}). Open it as text anyway?`, {
+        title: "Open as text?",
+        kind: "warning",
+      });
+    }
+  } catch {
+    /* if sniffing fails, let the normal open attempt proceed */
+  }
+  return true;
+}
 
 /** The caret-over-a-line brand mark (docs/brand.md). Coral caret, ink line. */
 function Mark({ size = 20 }: { size?: number }) {
@@ -1009,19 +1060,26 @@ function App() {
     setBusy(true);
     try {
       const dark = darkRef.current;
-      // Open each file as its own tab. `open_document` is async (it builds the buffer on
-      // a worker thread), so open all but the last in parallel — their highlights run on
-      // separate threads, cutting the wall-clock of a multi-file open and keeping the UI
-      // responsive — then open the last one so it ends up active.
-      if (paths.length > 1) {
+      // Gate each file through the open-type guard first (prompts only for ones that look
+      // binary); drop any the user declines.
+      const approved: string[] = [];
+      for (const p of paths) {
+        if (await shouldOpenAsText(p)) approved.push(p);
+      }
+      if (!approved.length) return;
+      // Open each approved file as its own tab. `open_document` is async (it builds the
+      // buffer on a worker thread), so open all but the last in parallel — their highlights
+      // run on separate threads, cutting the wall-clock of a multi-file open and keeping the
+      // UI responsive — then open the last one so it ends up active.
+      if (approved.length > 1) {
         await Promise.all(
-          paths.slice(0, -1).map((p) => invoke<TabsState>("open_document", { path: p, dark })),
+          approved.slice(0, -1).map((p) => invoke<TabsState>("open_document", { path: p, dark })),
         );
       }
-      const last = await invoke<TabsState>("open_document", { path: paths[paths.length - 1], dark });
+      const last = await invoke<TabsState>("open_document", { path: approved[approved.length - 1], dark });
       await applyTabsState(last);
-      void revealInTree(paths[paths.length - 1]);
-      paths.forEach((p) => remember(p, "file"));
+      void revealInTree(approved[approved.length - 1]);
+      approved.forEach((p) => remember(p, "file"));
     } catch (e) {
       setError(String(e));
     } finally {
@@ -1054,6 +1112,7 @@ function App() {
       setBusy(true);
       try {
         const dark = darkRef.current;
+        if (!(await shouldOpenAsText(path))) return; // binary, user declined
         await applyTabsState(await invoke<TabsState>("open_document", { path, dark }));
         void revealInTree(path);
         remember(path, "file");
