@@ -1,7 +1,9 @@
 # Roadmap
 
-tuhi is early. This is the outward-facing plan and it will move as things land. Ideas
-and priorities are welcome, open an issue.
+**v1.0 has shipped** — large files, Markdown mode (preview, edit-in-place,
+tables/code/Mermaid/KaTeX) and crash-safe editing are all in. This is the outward-facing
+plan for where it goes next; the pre-1.0 milestones below are kept as the record of how it
+got here. Ideas and priorities are welcome, open an issue.
 
 ## 0.1.0 — first release
 
@@ -110,5 +112,10 @@ quietly block shippable work.
 - **Background opacity / window translucency** — an optional Settings slider for a
   translucent window. Deferred from 1.0 (legibility and per-OS compositor quirks), but
   the geeks love it, so it's on the list.
+- **Android (and iOS) build** *(research)* — Tauri v2 can target mobile, but tuhi is built
+  as a desktop big-file editor (file tree, keyboard-first, memory-mapped files). A mobile
+  port means a separate build target (Android Studio + NDK), a restrictive file-access
+  model (scoped storage), a touch UX, and the big-file story re-proven on a phone — a real
+  project scoped on its own merits, not a flag bolted onto the desktop build.
 - Modern multi-cursor, find-in-files, show-unprintable-characters.
 - Signed / notarised builds once there's traction (0.1.0 ships unsigned).
