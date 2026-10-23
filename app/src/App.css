@@ -30,8 +30,6 @@ html, body, #root {
 .shell {
   display: flex;
   height: 100vh;
-  max-width: 100vw;
-  overflow: hidden;
 }
 /* Everything right of the full-height rail: the top bar + the body row. */
 .main {
@@ -913,22 +911,30 @@ html, body, #root {
     gap: 10px;
   }
 
-  /* Recovery banner: give each file its own full-width row so the Restore /
-     Discard buttons can't overflow off the edge. */
+  /* Recovery banner → a vertical card on a phone. The desktop toolbar layout
+     crammed the per-file rows into a narrow right-hand column and spilled past
+     the edge, so stack the whole bar and drop the per-file Restore/Discard
+     (Restore all / Later cover it on a phone). */
+  .recovery-bar {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+  }
+  .recovery-icon {
+    display: none;
+  }
   .recovery-items {
     flex-direction: column;
     align-items: stretch;
+    gap: 4px;
     width: 100%;
-    gap: 8px;
   }
-  .recovery-item {
-    width: 100%;
-    justify-content: space-between;
+  .recovery-item .recovery-btn {
+    display: none;
   }
   .recovery-name {
     max-width: none;
     min-width: 0;
-    flex: 1;
   }
 }
 
