@@ -27,3 +27,6 @@ Thumbs.db
 
 # wrangler (Cloudflare Pages) local cache
 .wrangler/
+
+# Private launch planning (not for the public repo)
+/LAUNCH-PLAN.md
