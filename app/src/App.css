@@ -30,6 +30,8 @@ html, body, #root {
 .shell {
   display: flex;
   height: 100vh;
+  max-width: 100vw;
+  overflow: hidden;
 }
 /* Everything right of the full-height rail: the top bar + the body row. */
 .main {
