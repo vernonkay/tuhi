@@ -238,6 +238,76 @@
         gap: 12px;
         flex-wrap: wrap;
       }
+
+      section.install {
+        margin: 64px 0;
+      }
+      .install h2 {
+        font-family: var(--display);
+        font-weight: 700;
+        font-size: 28px;
+        letter-spacing: -0.02em;
+        text-align: center;
+        margin: 0 0 6px;
+      }
+      .install-sub {
+        text-align: center;
+        color: var(--slate);
+        margin: 0 0 32px;
+        font-size: 15px;
+      }
+      .install-grid {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 16px;
+      }
+      .os {
+        background: var(--paper);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 22px 20px;
+        min-width: 0;
+      }
+      .os h3 {
+        font-family: var(--display);
+        font-weight: 700;
+        font-size: 17px;
+        margin: 0 0 14px;
+      }
+      .cmd {
+        font-family: var(--mono);
+        font-size: 12.5px;
+        background: var(--panel);
+        color: var(--ink);
+        border: 1px solid var(--border);
+        padding: 12px 14px;
+        border-radius: 8px;
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+        margin: 0 0 12px;
+        line-height: 1.6;
+      }
+      .os .dl {
+        font-size: 13.5px;
+        color: var(--slate);
+        margin: 0;
+      }
+      .os .dl a {
+        color: var(--coral);
+      }
+      .install-note {
+        text-align: center;
+        color: var(--slate);
+        font-size: 13px;
+        margin: 26px auto 0;
+        max-width: 62ch;
+        line-height: 1.6;
+      }
+      @media (max-width: 680px) {
+        .install-grid {
+          grid-template-columns: 1fr;
+        }
+      }
     </style>
   </head>
   <body>
@@ -322,6 +392,39 @@
             lock-in, no proprietary format. Just text, done well.
           </p>
         </div>
+      </section>
+
+      <section class="install">
+        <h2>Install</h2>
+        <p class="install-sub">Free and open source. Pick your platform.</p>
+        <div class="install-grid">
+          <div class="os">
+            <h3>Windows</h3>
+            <div class="cmd">scoop bucket add tuhi https://github.com/vernonkay/scoop-tuhi
+scoop install tuhi</div>
+            <p class="dl">
+              or <a href="https://github.com/vernonkay/tuhi/releases/latest">download the .exe / .msi</a>
+            </p>
+          </div>
+          <div class="os">
+            <h3>macOS</h3>
+            <div class="cmd">brew install --cask vernonkay/tuhi/tuhi</div>
+            <p class="dl">
+              or <a href="https://github.com/vernonkay/tuhi/releases/latest">download the .dmg</a> (universal)
+            </p>
+          </div>
+          <div class="os">
+            <h3>Linux</h3>
+            <p class="dl">
+              <a href="https://github.com/vernonkay/tuhi/releases/latest">Download</a> the .AppImage,
+              .deb or .rpm
+            </p>
+          </div>
+        </div>
+        <p class="install-note">
+          First launch shows a one-time "unverified developer" warning (the builds aren't signed
+          yet): on Windows, <b>More info → Run anyway</b>; on macOS, <b>right-click → Open</b>.
+        </p>
       </section>
 
       <footer>
