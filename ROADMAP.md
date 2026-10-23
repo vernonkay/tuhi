@@ -112,10 +112,17 @@ quietly block shippable work.
 - **Background opacity / window translucency** — an optional Settings slider for a
   translucent window. Deferred from 1.0 (legibility and per-OS compositor quirks), but
   the geeks love it, so it's on the list.
-- **Android (and iOS) build** *(research)* — Tauri v2 can target mobile, but tuhi is built
-  as a desktop big-file editor (file tree, keyboard-first, memory-mapped files). A mobile
-  port means a separate build target (Android Studio + NDK), a restrictive file-access
-  model (scoped storage), a touch UX, and the big-file story re-proven on a phone — a real
-  project scoped on its own merits, not a flag bolted onto the desktop build.
+- **Android (and iOS) build** *(research — spiked Oct 2026)* — Tauri v2 can target mobile,
+  but tuhi is built as a desktop big-file editor (file tree, keyboard-first, memory-mapped
+  files). A mobile port means a separate build target (Android Studio + NDK), a restrictive
+  file-access model (scoped storage), a touch UX, and the big-file story re-proven on a
+  phone — a real project scoped on its own merits, not a flag bolted onto the desktop build.
+  A spike in October 2026 got the Rust core cross-compiling to `aarch64-android` and the APK
+  building, installing, launching and rendering Markdown on a real device, and landed a
+  first mobile/touch UI pass (responsive panels, touch targets, auto-save). **The remaining
+  blocker is file access:** Android's picker hands back `content://` URIs, and tuhi's engine
+  opens by filesystem path, so a picked file fails to open. Doing it right means resolving
+  the URI to a file descriptor and memory-mapping the fd, so the big-file story survives on
+  mobile too — the real work of this item, still ahead.
 - Modern multi-cursor, find-in-files, show-unprintable-characters.
 - Signed / notarised builds once there's traction (0.1.0 ships unsigned).
