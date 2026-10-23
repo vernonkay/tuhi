@@ -6,6 +6,44 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.0.1] — 2026-10-24
+
+A small, desktop-safe follow-up to 1.0.0, released so the launch-day download carries the
+recovery-banner fix. It also lands the first mobile/touch adaptation layer, which is
+confined to the mobile build and to narrow or touch viewports — the desktop app is
+unchanged apart from the three items below.
+
+### Fixed
+
+- **Recovery banner layout.** The unsaved-work recovery bar now stacks above the editor
+  instead of trying to share its row (`.workarea` lays out as a column), so it no longer
+  crowds the editor on any window size.
+
+### Added
+
+- **A visible "Open a file…" button** on the empty / welcome view, next to the keyboard
+  hint, so there is an obvious pointer-driven way in.
+- **On-screen Cancel / Done buttons** for in-place Markdown block editing, alongside the
+  existing <kbd>Ctrl/Cmd+Enter</kbd> and <kbd>Esc</kbd> shortcuts.
+- **First mobile / touch responsive pass (Android build).** Overlay file-tree and outline
+  panels, a condensed status bar, the recovery banner as a vertical card, finger-sized
+  rail and action targets, safe-area insets for notch/status/nav bars, and auto-save after
+  edits settle. All of this is gated to the mobile build (`IS_MOBILE`, by user agent) or to
+  narrow / coarse-pointer viewports, so a touch-screen desktop keeps the full desktop
+  behaviour — auto-save and hidden window controls never reach the desktop app.
+
+## [1.0.0] — 2026-10-23
+
+The 1.0 milestone: the large-file engine, Markdown mode and crash-safe editing are
+considered stable, and the project is now marketed as a finished editor. Functionally this
+is the 0.1.1 feature set declared 1.0; there are no behavioural changes to the app beyond
+the version bump and the item below. Launched alongside a landing page
+(<https://tuhi-editor.pages.dev>), a big-file demo, and Scoop / Homebrew install channels.
+
+### Added
+
+- **A favicon / app mark** derived from the caret logo, for the site and the app window.
+
 ## [0.1.1] — 2026-10-20
 
 A correctness and polish release. **Upgrade strongly recommended:** 0.1.0 could corrupt
@@ -69,6 +107,8 @@ First public release: a fast, cross-platform editor that leads with large-file h
   and session restore (reopens the files you had open).
 - A restrictive Content-Security-Policy.
 
-[Unreleased]: https://github.com/vernonkay/tuhi/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/vernonkay/tuhi/compare/v1.0.1...HEAD
+[1.0.1]: https://github.com/vernonkay/tuhi/compare/v1.0.0...v1.0.1
+[1.0.0]: https://github.com/vernonkay/tuhi/compare/v0.1.1...v1.0.0
 [0.1.1]: https://github.com/vernonkay/tuhi/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/vernonkay/tuhi/releases/tag/v0.1.0
