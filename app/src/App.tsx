@@ -268,6 +268,11 @@ const MD_PREVIEW_MAX_CHARS = 5 * 1024 * 1024;
 /** Platform-appropriate shortcut label: "⌘O" on macOS, "Ctrl+O" elsewhere. */
 const IS_MAC =
   typeof navigator !== "undefined" && /Mac|iPhone|iPad|iPod/.test(navigator.platform || navigator.userAgent || "");
+/** A touch-primary device (phone/tablet): no keyboard, so no Ctrl+S — we auto-save instead. */
+const IS_TOUCH =
+  typeof window !== "undefined" &&
+  typeof window.matchMedia === "function" &&
+  window.matchMedia("(pointer: coarse)").matches;
 const combo = (key: string) => (IS_MAC ? `⌘${key}` : `Ctrl+${key}`);
 
 /** Mirror of the Rust `FileSniff`: whether a file looks binary, and a short reason. */
@@ -1233,6 +1238,15 @@ function App() {
       setError(String(e));
     }
   }, [meta, flushTypingNow]);
+
+  // On touch devices there is no Ctrl+S, so save the file automatically a short while after
+  // edits settle; desktop keeps explicit save. Only a dirty, writable file with a path —
+  // large files are read-only, so this never fights the memory-mapped engine.
+  useEffect(() => {
+    if (!IS_TOUCH || !meta?.path || readonly || !meta?.dirty) return;
+    const t = window.setTimeout(() => void handleSave(), 1500);
+    return () => clearTimeout(t);
+  }, [meta?.char_count, meta?.dirty, meta?.path, readonly, handleSave]);
 
   // Open a file by path (from the tree or the palette), reusing the tab machinery.
   const openPath = useCallback(
