@@ -268,6 +268,11 @@ const MD_PREVIEW_MAX_CHARS = 5 * 1024 * 1024;
 /** Platform-appropriate shortcut label: "⌘O" on macOS, "Ctrl+O" elsewhere. */
 const IS_MAC =
   typeof navigator !== "undefined" && /Mac|iPhone|iPad|iPod/.test(navigator.platform || navigator.userAgent || "");
+/** The actual mobile build (Android/iOS), by user agent — NOT a touchscreen desktop.
+ *  Behaviour that must never reach the desktop app (auto-save, hiding the OS window
+ *  controls) is gated on this, so a touch-screen Windows laptop is unaffected. */
+const IS_MOBILE =
+  typeof navigator !== "undefined" && /Android|iPhone|iPad|iPod/i.test(navigator.userAgent || "");
 const combo = (key: string) => (IS_MAC ? `⌘${key}` : `Ctrl+${key}`);
 
 /** Mirror of the Rust `FileSniff`: whether a file looks binary, and a short reason. */
@@ -479,6 +484,9 @@ function App() {
   const editBlockRef = useRef<number | null>(null);
   const editAreaRef = useRef<HTMLTextAreaElement>(null);
   const skipCommitRef = useRef(false);
+  // A Done/Cancel tap on the block editor commits on pointerdown, which re-renders the
+  // block; the click that follows must not be read as "open the block now under the finger".
+  const swallowClickRef = useRef(false);
   const [filterOpen, setFilterOpen] = useState(false);
   const [filterQuery, setFilterQuery] = useState("");
   const [filterMatches, setFilterMatches] = useState<FilterMatch[]>([]);
@@ -1230,6 +1238,15 @@ function App() {
       setError(String(e));
     }
   }, [meta, flushTypingNow]);
+
+  // On touch devices there is no Ctrl+S, so save the file automatically a short while after
+  // edits settle; desktop keeps explicit save. Only a dirty, writable file with a path —
+  // large files are read-only, so this never fights the memory-mapped engine.
+  useEffect(() => {
+    if (!IS_MOBILE || !meta?.path || readonly || !meta?.dirty) return;
+    const t = window.setTimeout(() => void handleSave(), 1500);
+    return () => clearTimeout(t);
+  }, [meta?.char_count, meta?.dirty, meta?.path, readonly, handleSave]);
 
   // Open a file by path (from the tree or the palette), reusing the tab machinery.
   const openPath = useCallback(
@@ -2417,8 +2434,32 @@ function App() {
             onBlur={onBlockEditBlur}
             onInput={(e) => autosizeEdit(e.currentTarget)}
           />
-          <div className="md-blockedit-hint">
-            <b>{combo("Enter")}</b> save · <b>Esc</b> cancel
+          <div className="md-blockedit-bar">
+            <button
+              type="button"
+              className="be-btn be-cancel"
+              onPointerDown={(e) => {
+                e.preventDefault();
+                swallowClickRef.current = true;
+                cancelEdit();
+              }}
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              className="be-btn be-done"
+              onPointerDown={(e) => {
+                e.preventDefault();
+                swallowClickRef.current = true;
+                void commitEdit(editAreaRef.current?.value ?? "");
+              }}
+            >
+              Done
+            </button>
+            <span className="md-blockedit-hint">
+              <b>{combo("Enter")}</b> · <b>Esc</b>
+            </span>
           </div>
         </div>
       );
@@ -2436,6 +2477,10 @@ function App() {
   // lands outside it (click-away saves), else open the clicked block for editing.
   // A link click or an active text selection (reading-mode copy) is left alone.
   const onPreviewClick = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (swallowClickRef.current) {
+      swallowClickRef.current = false;
+      return; // the click trailing a Done/Cancel tap, not a request to edit a new block
+    }
     const target = e.target as HTMLElement;
     if (target.closest(".md-blockedit")) return; // clicks inside the open editor
     if (editBlockRef.current != null) {
@@ -2534,7 +2579,7 @@ function App() {
   };
 
   return (
-    <div className="shell tg">
+    <div className={`shell tg${IS_MOBILE ? " mobile" : ""}`}>
       <aside className="gut gut-l">
         <div className="gut-cap">
           <Mark size={20} />
@@ -2973,9 +3018,12 @@ function App() {
             <Mark size={44} />
             <p className="empty-word">tuhi<span className="empty-dot">.</span></p>
             <p className="empty-tag">A fast, calm place to write.</p>
+            <button type="button" className="empty-open" onClick={() => void handleOpen()}>
+              Open a file…
+            </button>
             <p className="hint">
-              Open a file with <b>{combo("O")}</b>, or press <b>{combo("P")}</b> for
-              everything. Large files open and scroll without ever loading into the view.
+              or press <b>{combo("O")}</b> to open and <b>{combo("P")}</b> for everything.
+              Large files open and scroll without ever loading into the view.
             </p>
           </div>
         )}
@@ -3062,7 +3110,8 @@ function App() {
         {caret && <span className="pos">Ln {caret.line + 1}, Col {caret.col + 1}</span>}
         {meta && (
           <span className="counts">
-            {meta.line_count.toLocaleString()} lines · {meta.char_count.toLocaleString()} chars
+            <span className="sb-lines">{meta.line_count.toLocaleString()} lines</span>
+            <span className="sb-chars"> · {meta.char_count.toLocaleString()} chars</span>
             {meta.dirty ? " · modified" : ""}
           </span>
         )}

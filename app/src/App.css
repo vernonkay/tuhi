@@ -186,7 +186,7 @@ html, body, #root {
 }
 
 /* Editor + outline row */
-.workarea { flex: 1; display: flex; min-height: 0; min-width: 0; position: relative; }
+.workarea { flex: 1; display: flex; flex-direction: column; min-height: 0; min-width: 0; position: relative; }
 
 /* Filter-to-view: a read-only overlay listing only the matching lines. Sits over the
    editor (which stays mounted underneath), so closing it restores state instantly. */
@@ -591,6 +591,42 @@ html, body, #root {
 .empty-dot { color: var(--coral); }
 .empty-tag { font-size: 16px; margin-top: 6px; color: var(--slate); }
 .empty .hint { font-size: 13px; max-width: 44ch; margin: 18px auto 0; }
+/* Touch-reachable "Open a file" — the primary way in when there's no keyboard. */
+.empty-open {
+  display: inline-block;
+  margin-top: 20px;
+  font: inherit;
+  font-weight: 600;
+  font-size: 14px;
+  padding: 10px 22px;
+  border-radius: 9px;
+  border: none;
+  background: var(--coral);
+  color: #fff;
+  cursor: pointer;
+}
+.empty-open:hover { filter: brightness(1.05); }
+
+/* Touch-reachable Done / Cancel for an in-place block edit (no Ctrl+Enter on a phone). */
+.md-blockedit-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+}
+.be-btn {
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 5px 14px;
+  border-radius: 7px;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--ink);
+  cursor: pointer;
+}
+.be-done { background: var(--coral); color: #fff; border-color: var(--coral); }
+.md-blockedit-bar .md-blockedit-hint { margin-left: auto; font-size: 11px; color: var(--slate); }
 
 /* Status bar */
 .statusbar {
@@ -829,6 +865,118 @@ html, body, #root {
   overflow-x: auto; margin: 0 0 0.9em;
 }
 .md-codeblock code { white-space: pre; }
+
+/* ============================================================
+   Mobile / touch adaptations (Android + narrow windows).
+   The desktop layout assumes width and a mouse: fixed side panels
+   stole the editor's width and targets were mouse-sized. Narrow
+   viewports float the panels over the editor; touch devices grow the
+   targets and drop the desktop window chrome; everything clears the
+   phone's status bar, nav bar and notch.
+   ============================================================ */
+@media (max-width: 600px) {
+  /* File tree and outline overlay the editor instead of taking columns,
+     so the editor keeps the full width behind them. */
+  .filetree {
+    position: fixed;
+    top: 0;
+    bottom: 0;
+    left: 48px;
+    width: min(80vw, 300px);
+    z-index: 45;
+    box-shadow: 10px 0 40px rgba(0, 0, 0, 0.3);
+  }
+  .outline-panel {
+    position: fixed;
+    top: 0;
+    bottom: 0;
+    right: 0;
+    width: min(80vw, 300px);
+    z-index: 45;
+    box-shadow: -10px 0 40px rgba(0, 0, 0, 0.3);
+  }
+  .ft-resizer { display: none; }
+
+  /* Rationalise the status bar to the essentials at phone width: keep the
+     position and line count (tuhi's signature), drop the path, the follow /
+     highlighter chrome and the char count so it stays one clean, un-munged line. */
+  .statusbar .path,
+  .statusbar .badge-ro,
+  .statusbar .sb-btn,
+  .statusbar .sb-chars {
+    display: none;
+  }
+  .statusbar {
+    justify-content: flex-end;
+    gap: 10px;
+  }
+
+  /* Recovery banner → a vertical card on a phone. The desktop toolbar layout
+     crammed the per-file rows into a narrow right-hand column and spilled past
+     the edge, so stack the whole bar and drop the per-file Restore/Discard
+     (Restore all / Later cover it on a phone). */
+  .recovery-bar {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+  }
+  .recovery-icon {
+    display: none;
+  }
+  .recovery-items {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 4px;
+    width: 100%;
+  }
+  .recovery-item .recovery-btn {
+    display: none;
+  }
+  .recovery-name {
+    max-width: none;
+    min-width: 0;
+  }
+}
+
+/* The OS window min/max/close controls are meaningless in the mobile build (no window
+   to drive) — hidden there only, so a touch-screen desktop keeps them. */
+.shell.mobile .wc { display: none; }
+
+@media (pointer: coarse) {
+  /* Fingers need room. */
+  .rail {
+    flex-basis: 54px;
+    width: 54px;
+  }
+  .rail-btn {
+    width: 44px;
+    height: 44px;
+  }
+  .rail-btn svg {
+    width: 23px;
+    height: 23px;
+  }
+  /* Finger-sized action buttons. */
+  .be-btn {
+    padding: 9px 18px;
+    font-size: 13px;
+  }
+  .empty-open {
+    padding: 13px 26px;
+    font-size: 15px;
+  }
+  .recovery-btn {
+    padding: 8px 16px;
+    font-size: 13px;
+  }
+}
+
+/* Clear the phone's status bar, nav bar and notch (no-op on desktop,
+   where the safe-area insets resolve to 0). Needs viewport-fit=cover. */
+.shell {
+  padding-top: env(safe-area-inset-top, 0px);
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
 
 /* Fenced-code syntax colours (highlight.js token classes), themed to the palette rather
    than a bundled hljs theme. A few code-specific hues (string/number/function) get dark
