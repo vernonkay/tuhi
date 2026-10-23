@@ -830,6 +830,63 @@ html, body, #root {
 }
 .md-codeblock code { white-space: pre; }
 
+/* ============================================================
+   Mobile / touch adaptations (Android + narrow windows).
+   The desktop layout assumes width and a mouse: fixed side panels
+   stole the editor's width and targets were mouse-sized. Narrow
+   viewports float the panels over the editor; touch devices grow the
+   targets and drop the desktop window chrome; everything clears the
+   phone's status bar, nav bar and notch.
+   ============================================================ */
+@media (max-width: 600px) {
+  /* File tree and outline overlay the editor instead of taking columns,
+     so the editor keeps the full width behind them. */
+  .filetree {
+    position: fixed;
+    top: 0;
+    bottom: 0;
+    left: 48px;
+    width: min(80vw, 300px);
+    z-index: 45;
+    box-shadow: 10px 0 40px rgba(0, 0, 0, 0.3);
+  }
+  .outline-panel {
+    position: fixed;
+    top: 0;
+    bottom: 0;
+    right: 0;
+    width: min(80vw, 300px);
+    z-index: 45;
+    box-shadow: -10px 0 40px rgba(0, 0, 0, 0.3);
+  }
+  .ft-resizer { display: none; }
+}
+
+@media (pointer: coarse) {
+  /* No OS window to minimise/maximise/close on a phone. */
+  .wc { display: none; }
+  /* Fingers need room. */
+  .rail {
+    flex-basis: 54px;
+    width: 54px;
+  }
+  .rail-btn {
+    width: 44px;
+    height: 44px;
+  }
+  .rail-btn svg {
+    width: 23px;
+    height: 23px;
+  }
+}
+
+/* Clear the phone's status bar, nav bar and notch (no-op on desktop,
+   where the safe-area insets resolve to 0). Needs viewport-fit=cover. */
+.shell {
+  padding-top: env(safe-area-inset-top, 0px);
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+
 /* Fenced-code syntax colours (highlight.js token classes), themed to the palette rather
    than a bundled hljs theme. A few code-specific hues (string/number/function) get dark
    overrides; keyword and comment reuse the brand tokens, which are already theme-aware. */
