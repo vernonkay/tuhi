@@ -591,6 +591,42 @@ html, body, #root {
 .empty-dot { color: var(--coral); }
 .empty-tag { font-size: 16px; margin-top: 6px; color: var(--slate); }
 .empty .hint { font-size: 13px; max-width: 44ch; margin: 18px auto 0; }
+/* Touch-reachable "Open a file" — the primary way in when there's no keyboard. */
+.empty-open {
+  display: inline-block;
+  margin-top: 20px;
+  font: inherit;
+  font-weight: 600;
+  font-size: 14px;
+  padding: 10px 22px;
+  border-radius: 9px;
+  border: none;
+  background: var(--coral);
+  color: #fff;
+  cursor: pointer;
+}
+.empty-open:hover { filter: brightness(1.05); }
+
+/* Touch-reachable Done / Cancel for an in-place block edit (no Ctrl+Enter on a phone). */
+.md-blockedit-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+}
+.be-btn {
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 5px 14px;
+  border-radius: 7px;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--ink);
+  cursor: pointer;
+}
+.be-done { background: var(--coral); color: #fff; border-color: var(--coral); }
+.md-blockedit-bar .md-blockedit-hint { margin-left: auto; font-size: 11px; color: var(--slate); }
 
 /* Status bar */
 .statusbar {
@@ -891,6 +927,15 @@ html, body, #root {
   .rail-btn svg {
     width: 23px;
     height: 23px;
+  }
+  /* Finger-sized action buttons. */
+  .be-btn {
+    padding: 9px 18px;
+    font-size: 13px;
+  }
+  .empty-open {
+    padding: 13px 26px;
+    font-size: 15px;
   }
 }
 

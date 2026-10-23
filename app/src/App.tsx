@@ -2417,8 +2417,30 @@ function App() {
             onBlur={onBlockEditBlur}
             onInput={(e) => autosizeEdit(e.currentTarget)}
           />
-          <div className="md-blockedit-hint">
-            <b>{combo("Enter")}</b> save · <b>Esc</b> cancel
+          <div className="md-blockedit-bar">
+            <button
+              type="button"
+              className="be-btn be-cancel"
+              onPointerDown={(e) => {
+                e.preventDefault();
+                cancelEdit();
+              }}
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              className="be-btn be-done"
+              onPointerDown={(e) => {
+                e.preventDefault();
+                void commitEdit(editAreaRef.current?.value ?? "");
+              }}
+            >
+              Done
+            </button>
+            <span className="md-blockedit-hint">
+              <b>{combo("Enter")}</b> · <b>Esc</b>
+            </span>
           </div>
         </div>
       );
@@ -2973,9 +2995,12 @@ function App() {
             <Mark size={44} />
             <p className="empty-word">tuhi<span className="empty-dot">.</span></p>
             <p className="empty-tag">A fast, calm place to write.</p>
+            <button type="button" className="empty-open" onClick={() => void handleOpen()}>
+              Open a file…
+            </button>
             <p className="hint">
-              Open a file with <b>{combo("O")}</b>, or press <b>{combo("P")}</b> for
-              everything. Large files open and scroll without ever loading into the view.
+              or press <b>{combo("O")}</b> to open and <b>{combo("P")}</b> for everything.
+              Large files open and scroll without ever loading into the view.
             </p>
           </div>
         )}
