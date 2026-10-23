@@ -3062,7 +3062,8 @@ function App() {
         {caret && <span className="pos">Ln {caret.line + 1}, Col {caret.col + 1}</span>}
         {meta && (
           <span className="counts">
-            {meta.line_count.toLocaleString()} lines · {meta.char_count.toLocaleString()} chars
+            <span className="sb-lines">{meta.line_count.toLocaleString()} lines</span>
+            <span className="sb-chars"> · {meta.char_count.toLocaleString()} chars</span>
             {meta.dirty ? " · modified" : ""}
           </span>
         )}

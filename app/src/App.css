@@ -860,6 +860,20 @@ html, body, #root {
     box-shadow: -10px 0 40px rgba(0, 0, 0, 0.3);
   }
   .ft-resizer { display: none; }
+
+  /* Rationalise the status bar to the essentials at phone width: keep the
+     position and line count (tuhi's signature), drop the path, the follow /
+     highlighter chrome and the char count so it stays one clean, un-munged line. */
+  .statusbar .path,
+  .statusbar .badge-ro,
+  .statusbar .sb-btn,
+  .statusbar .sb-chars {
+    display: none;
+  }
+  .statusbar {
+    justify-content: flex-end;
+    gap: 10px;
+  }
 }
 
 @media (pointer: coarse) {
