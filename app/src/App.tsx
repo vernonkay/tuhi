@@ -268,11 +268,11 @@ const MD_PREVIEW_MAX_CHARS = 5 * 1024 * 1024;
 /** Platform-appropriate shortcut label: "⌘O" on macOS, "Ctrl+O" elsewhere. */
 const IS_MAC =
   typeof navigator !== "undefined" && /Mac|iPhone|iPad|iPod/.test(navigator.platform || navigator.userAgent || "");
-/** A touch-primary device (phone/tablet): no keyboard, so no Ctrl+S — we auto-save instead. */
-const IS_TOUCH =
-  typeof window !== "undefined" &&
-  typeof window.matchMedia === "function" &&
-  window.matchMedia("(pointer: coarse)").matches;
+/** The actual mobile build (Android/iOS), by user agent — NOT a touchscreen desktop.
+ *  Behaviour that must never reach the desktop app (auto-save, hiding the OS window
+ *  controls) is gated on this, so a touch-screen Windows laptop is unaffected. */
+const IS_MOBILE =
+  typeof navigator !== "undefined" && /Android|iPhone|iPad|iPod/i.test(navigator.userAgent || "");
 const combo = (key: string) => (IS_MAC ? `⌘${key}` : `Ctrl+${key}`);
 
 /** Mirror of the Rust `FileSniff`: whether a file looks binary, and a short reason. */
@@ -1243,7 +1243,7 @@ function App() {
   // edits settle; desktop keeps explicit save. Only a dirty, writable file with a path —
   // large files are read-only, so this never fights the memory-mapped engine.
   useEffect(() => {
-    if (!IS_TOUCH || !meta?.path || readonly || !meta?.dirty) return;
+    if (!IS_MOBILE || !meta?.path || readonly || !meta?.dirty) return;
     const t = window.setTimeout(() => void handleSave(), 1500);
     return () => clearTimeout(t);
   }, [meta?.char_count, meta?.dirty, meta?.path, readonly, handleSave]);
@@ -2579,7 +2579,7 @@ function App() {
   };
 
   return (
-    <div className="shell tg">
+    <div className={`shell tg${IS_MOBILE ? " mobile" : ""}`}>
       <aside className="gut gut-l">
         <div className="gut-cap">
           <Mark size={20} />

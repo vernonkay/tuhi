@@ -938,9 +938,11 @@ html, body, #root {
   }
 }
 
+/* The OS window min/max/close controls are meaningless in the mobile build (no window
+   to drive) — hidden there only, so a touch-screen desktop keeps them. */
+.shell.mobile .wc { display: none; }
+
 @media (pointer: coarse) {
-  /* No OS window to minimise/maximise/close on a phone. */
-  .wc { display: none; }
   /* Fingers need room. */
   .rail {
     flex-basis: 54px;
