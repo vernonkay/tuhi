@@ -479,6 +479,9 @@ function App() {
   const editBlockRef = useRef<number | null>(null);
   const editAreaRef = useRef<HTMLTextAreaElement>(null);
   const skipCommitRef = useRef(false);
+  // A Done/Cancel tap on the block editor commits on pointerdown, which re-renders the
+  // block; the click that follows must not be read as "open the block now under the finger".
+  const swallowClickRef = useRef(false);
   const [filterOpen, setFilterOpen] = useState(false);
   const [filterQuery, setFilterQuery] = useState("");
   const [filterMatches, setFilterMatches] = useState<FilterMatch[]>([]);
@@ -2423,6 +2426,7 @@ function App() {
               className="be-btn be-cancel"
               onPointerDown={(e) => {
                 e.preventDefault();
+                swallowClickRef.current = true;
                 cancelEdit();
               }}
             >
@@ -2433,6 +2437,7 @@ function App() {
               className="be-btn be-done"
               onPointerDown={(e) => {
                 e.preventDefault();
+                swallowClickRef.current = true;
                 void commitEdit(editAreaRef.current?.value ?? "");
               }}
             >
@@ -2458,6 +2463,10 @@ function App() {
   // lands outside it (click-away saves), else open the clicked block for editing.
   // A link click or an active text selection (reading-mode copy) is left alone.
   const onPreviewClick = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (swallowClickRef.current) {
+      swallowClickRef.current = false;
+      return; // the click trailing a Done/Cancel tap, not a request to edit a new block
+    }
     const target = e.target as HTMLElement;
     if (target.closest(".md-blockedit")) return; // clicks inside the open editor
     if (editBlockRef.current != null) {
