@@ -186,7 +186,7 @@ html, body, #root {
 }
 
 /* Editor + outline row */
-.workarea { flex: 1; display: flex; min-height: 0; min-width: 0; position: relative; }
+.workarea { flex: 1; display: flex; flex-direction: column; min-height: 0; min-width: 0; position: relative; }
 
 /* Filter-to-view: a read-only overlay listing only the matching lines. Sits over the
    editor (which stays mounted underneath), so closing it restores state instantly. */
