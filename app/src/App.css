@@ -825,6 +825,10 @@ html, body, #root {
   max-width: 760px; margin: 0 auto; position: relative;
   font-family: var(--ui-font); color: var(--ink); font-size: 15px; line-height: 1.65;
 }
+/* Reading width (Settings → Reading width). "narrow" is the default above — a readable
+   line length; "wide" and "full" trade that for using more of a large screen. */
+.mdview[data-mdwidth="wide"] .mdview-inner { max-width: 980px; }
+.mdview[data-mdwidth="full"] .mdview-inner { max-width: none; }
 /* One virtualized row per block. `flow-root` contains the block's vertical margins so the
    measured row height includes its spacing (no overlap/gaps); horizontal padding sets the
    text column. Vertical breathing room is the virtualizer's paddingStart/paddingEnd. */
