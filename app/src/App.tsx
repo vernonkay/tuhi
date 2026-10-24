@@ -522,6 +522,26 @@ function App() {
   // content that must restyle on theme change, e.g. Mermaid diagrams.
   const [isDark, setIsDark] = useState(false);
 
+  // Markdown reading-view width. "narrow" is the readable-measure default (~760px, the
+  // line length prose reads best at); "wide" and "full" trade that for using more of a big
+  // screen. Only affects the Markdown preview (App.css, via the data-mdwidth attribute).
+  const [mdWidth, setMdWidth] = useState<"narrow" | "wide" | "full">(() => {
+    try {
+      const w = localStorage.getItem("tuhi.mdWidth");
+      if (w === "narrow" || w === "wide" || w === "full") return w;
+    } catch {
+      /* default below */
+    }
+    return "narrow";
+  });
+  useEffect(() => {
+    try {
+      localStorage.setItem("tuhi.mdWidth", mdWidth);
+    } catch {
+      /* non-fatal: the setting just won't persist across restarts */
+    }
+  }, [mdWidth]);
+
   // Close the highlighter rules editor, returning to Settings if it opened from there
   // (it's a modal reached from within Settings, not a sibling of the editor).
   const closeHlEditor = useCallback(() => {
@@ -2923,7 +2943,7 @@ function App() {
         </div>
       )}
       {showLive ? (
-      <div className={`mdview${editBlock != null ? " editing" : ""}`} ref={mdScrollRef} tabIndex={0}>
+      <div className={`mdview${editBlock != null ? " editing" : ""}`} data-mdwidth={mdWidth} ref={mdScrollRef} tabIndex={0}>
         {blocks.length ? (
           <div
             className="mdview-inner"
@@ -3291,6 +3311,23 @@ function App() {
                   ))}
                 </div>
                 <div className="set-note">Auto follows your operating system.</div>
+              </div>
+              <div className="set-group">
+                <div className="set-label">Reading width</div>
+                <div className="set-seg">
+                  {(["narrow", "wide", "full"] as const).map((w) => (
+                    <button
+                      key={w}
+                      className={`set-opt${mdWidth === w ? " on" : ""}`}
+                      onClick={() => setMdWidth(w)}
+                    >
+                      {w === "narrow" ? "Narrow" : w === "wide" ? "Wide" : "Full"}
+                    </button>
+                  ))}
+                </div>
+                <div className="set-note">
+                  Width of the Markdown reading view. Narrow keeps a comfortable line length.
+                </div>
               </div>
               <div className="set-group">
                 <div className="set-label">Highlighters</div>
