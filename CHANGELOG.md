@@ -6,6 +6,20 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- **New file** (<kbd>Ctrl/Cmd+N</kbd>): opens a fresh, empty, untitled document in its own
+  tab; the first save prompts for a location (Save As). Reachable from the rail, the command
+  palette and the welcome view.
+- A visible **Format JSON** control in the rail — the one-key JSON pretty-print was
+  previously only in the command palette, so it was easy to miss.
+
+### Fixed
+
+- **Save As now renames its tab.** Saving a new untitled document kept the buffer and the
+  tab's own path out of sync, so the tab stayed "untitled" and would not restore on the next
+  launch; the tab now follows the saved file.
+
 ## [1.0.1] — 2026-10-24
 
 A small, desktop-safe follow-up to 1.0.0, released so the launch-day download carries the

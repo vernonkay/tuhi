@@ -606,6 +606,11 @@ html, body, #root {
   cursor: pointer;
 }
 .empty-open:hover { filter: brightness(1.05); }
+/* The empty view offers both ways in, side by side: filled "Open", outline "New file". */
+.empty-actions { display: flex; gap: 12px; margin-top: 20px; justify-content: center; flex-wrap: wrap; }
+.empty-actions .empty-open { margin-top: 0; }
+.empty-open-alt { background: transparent; color: var(--coral); border: 1px solid var(--coral); }
+.empty-open-alt:hover { background: var(--coral-soft); filter: none; }
 
 /* Touch-reachable Done / Cancel for an in-place block edit (no Ctrl+Enter on a phone). */
 .md-blockedit-bar {

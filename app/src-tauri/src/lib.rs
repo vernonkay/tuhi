@@ -18,6 +18,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             greet,
             editor::open_document,
+            editor::new_document,
             editor::sniff_file,
             editor::get_viewport,
             editor::request_highlight,
