@@ -14,6 +14,13 @@ follow [Semantic Versioning](https://semver.org/).
 - A visible **Format JSON** control in the rail — the one-key JSON pretty-print was
   previously only in the command palette, so it was easy to miss.
 
+### Changed
+
+- **Side panels dock beside the editor instead of floating over it.** The file-tree and
+  outline panels now take their own column and the editor resizes to fit, so text is no
+  longer hidden underneath a panel. On narrow or mobile widths they still float as an
+  overlay. This also moves the outline panel out from under the window buttons.
+
 ### Fixed
 
 - **Save As now renames its tab.** Saving a new untitled document kept the buffer and the
