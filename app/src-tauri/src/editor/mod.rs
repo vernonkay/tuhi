@@ -1217,6 +1217,28 @@ pub async fn open_document(
     Ok(reg.tabs_state())
 }
 
+/// Open a fresh, empty, untitled document in a new tab (Ctrl/Cmd+N). It has no path
+/// until the first save, which prompts for one (Save As) via `save_document`. Always
+/// the editable rope engine — a new document is small by definition. `dark` selects the
+/// highlight theme, matching `open_document`.
+#[tauri::command]
+pub fn new_document(dark: bool, state: State<EditorState>) -> Result<TabsState, EditorError> {
+    let mut reg = state.0.lock().map_err(|_| EditorError::LockPoisoned)?;
+    let id = reg.next_id;
+    reg.next_id += 1;
+    reg.tabs.push(Tab {
+        id,
+        path: None,
+        buffer: Box::new(RopeBuffer {
+            dark,
+            ..Default::default()
+        }),
+        recovery_id: gen_recovery_id(id),
+    });
+    reg.active = Some(id);
+    Ok(reg.tabs_state())
+}
+
 #[tauri::command]
 pub fn list_tabs(state: State<EditorState>) -> Result<TabsState, EditorError> {
     Ok(state
@@ -1511,12 +1533,18 @@ pub fn save_document(
     path: Option<String>,
     state: State<EditorState>,
 ) -> Result<DocumentMeta, EditorError> {
-    state
-        .0
-        .lock()
-        .map_err(|_| EditorError::LockPoisoned)?
-        .active_buffer_mut()?
-        .save(path)
+    let mut reg = state.0.lock().map_err(|_| EditorError::LockPoisoned)?;
+    let active = reg.active;
+    let meta = reg.active_buffer_mut()?.save(path.clone())?;
+    // Save As on an untitled tab (an explicit path): keep the tab's own path in sync with
+    // the buffer, so the tab name and the next-launch session restore follow the new file.
+    // (A plain Save of an already-saved file passes its existing path, so this is a no-op.)
+    if let (Some(p), Some(id)) = (path, active)
+        && let Some(tab) = reg.tabs.iter_mut().find(|t| t.id == id)
+    {
+        tab.path = Some(p);
+    }
+    Ok(meta)
 }
 
 /// Document meta after an undo/redo, plus where the caret should land (`None` when

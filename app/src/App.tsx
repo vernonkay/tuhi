@@ -1220,12 +1220,24 @@ function App() {
     }
   }, [applyTabsState, revealInTree, remember]);
 
+  // New empty, untitled document in its own tab (Ctrl/Cmd+N). It has no path until the
+  // first save, which prompts for one via the Save dialog (see handleSave).
+  const handleNew = useCallback(async () => {
+    setError(null);
+    try {
+      await applyTabsState(await invoke<TabsState>("new_document", { dark: darkRef.current }));
+    } catch (e) {
+      setError(String(e));
+    }
+  }, [applyTabsState]);
+
   const handleSave = useCallback(async () => {
     if (!meta) return;
     setError(null);
     await flushTypingNow(); // make sure buffered keystrokes are in the buffer...
     await editChain.current; // ...and all queued edits have applied before saving.
     let target: string | null = meta.path;
+    const wasUntitled = !target; // a new document being saved for the first time (Save As)
     if (!target) {
       const chosen = await saveDialog({});
       if (typeof chosen !== "string") return;
@@ -1234,6 +1246,13 @@ function App() {
     try {
       setMeta(await invoke<DocumentMeta>("save_document", { path: target }));
       void invoke("sync_recovery").catch(() => {}); // drop the now-saved buffer's snapshot
+      if (wasUntitled) {
+        // The tab just gained a path; refresh the strip so its name follows the file
+        // (the caret/scroll are left untouched, unlike a full tab switch).
+        const ts = await invoke<TabsState>("list_tabs");
+        setTabs(ts.tabs);
+        setActiveTabId(ts.active);
+      }
     } catch (e) {
       setError(String(e));
     }
@@ -1469,15 +1488,22 @@ function App() {
   // hanging thanks to the viewport's line cap, but are unreadable until reflowed).
   const formatJson = useCallback(async (): Promise<void> => {
     if (!meta || readonly) return;
+    setError(null);
     flushTypingNow();
     return enqueue(async () => {
-      const m = await invoke<DocumentMeta>("pretty_print");
-      setMeta(m);
-      charCountRef.current = m.char_count;
-      setAnchor(null);
-      anchorRef.current = null;
-      await setCaretFromIdx(0);
-      scrollerRef.current?.focus();
+      try {
+        const m = await invoke<DocumentMeta>("pretty_print");
+        setMeta(m);
+        charCountRef.current = m.char_count;
+        setAnchor(null);
+        anchorRef.current = null;
+        await setCaretFromIdx(0);
+        scrollerRef.current?.focus();
+      } catch (e) {
+        // Most often "not valid JSON" — surface it rather than failing silently, now that
+        // this is a visible button and not only a command-palette entry.
+        setError(String(e));
+      }
     });
   }, [meta, readonly, enqueue, flushTypingNow, setCaretFromIdx]);
 
@@ -1914,6 +1940,10 @@ function App() {
     const onKey = (e: KeyboardEvent) => {
       if (!(e.ctrlKey || e.metaKey) || e.altKey) return;
       switch (e.key.toLowerCase()) {
+        case "n":
+          e.preventDefault();
+          void handleNew();
+          break;
         case "o":
           e.preventDefault();
           void handleOpen();
@@ -1974,7 +2004,7 @@ function App() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [handleOpen, handleSave, closeActiveTab, openFind, undoRedo, meta, readonly]);
+  }, [handleNew, handleOpen, handleSave, closeActiveTab, openFind, undoRedo, meta, readonly]);
 
   // --- Movement (extend = hold Shift to grow the selection) ---
 
@@ -2532,6 +2562,7 @@ function App() {
   if (paletteOpen) {
     const C = "command" as const;
     const items: PaletteItem[] = [
+      { label: "New File", hint: combo("N"), kind: C, run: () => void handleNew() },
       { label: "Open File…", hint: combo("O"), kind: C, run: () => void handleOpen() },
       { label: "Open Folder…", kind: C, run: () => void openFolder() },
       ...(folderRoot && parentDir(folderRoot) ? [{ label: "Up to parent folder", kind: C, run: () => void goUp() }] : []),
@@ -2584,6 +2615,10 @@ function App() {
         <div className="gut-cap">
           <Mark size={20} />
         </div>
+        <button className="gut-dot-btn" onClick={() => void handleNew()} title={`New file (${combo("N")})`}>
+          <span className="gd" />
+          <span className="gd-label">New file</span>
+        </button>
         <button
           className={`gut-dot-btn${leftPanel === "files" ? " on" : ""}`}
           onClick={() => {
@@ -2630,6 +2665,15 @@ function App() {
         >
           <span className="gd" />
           <span className="gd-label">Filter</span>
+        </button>
+        <button
+          className="gut-dot-btn"
+          onClick={() => void formatJson()}
+          disabled={!meta || readonly}
+          title="Format JSON (pretty-print)"
+        >
+          <span className="gd" />
+          <span className="gd-label">Format JSON</span>
         </button>
         <button className="gut-dot-btn" onClick={openPalette} title={`Command palette (${combo("P")})`}>
           <span className="gd" />
@@ -3018,9 +3062,14 @@ function App() {
             <Mark size={44} />
             <p className="empty-word">tuhi<span className="empty-dot">.</span></p>
             <p className="empty-tag">A fast, calm place to write.</p>
-            <button type="button" className="empty-open" onClick={() => void handleOpen()}>
-              Open a file…
-            </button>
+            <div className="empty-actions">
+              <button type="button" className="empty-open" onClick={() => void handleOpen()}>
+                Open a file…
+              </button>
+              <button type="button" className="empty-open empty-open-alt" onClick={() => void handleNew()}>
+                New file
+              </button>
+            </div>
             <p className="hint">
               or press <b>{combo("O")}</b> to open and <b>{combo("P")}</b> for everything.
               Large files open and scroll without ever loading into the view.
