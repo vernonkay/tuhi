@@ -475,6 +475,9 @@ function App() {
   // A Markdown file opens in the rendered preview by default; this flips it to the
   // raw whole-document source editor (the rail "Source" dot / palette command).
   const [editSource, setEditSource] = useState(false);
+  // Whether the active document looks like JSON, so JSON-only actions (Format JSON) are
+  // offered only in context — never on a file they can't apply to.
+  const [docIsJson, setDocIsJson] = useState(false);
   const [blocks, setBlocks] = useState<MdBlock[]>([]);
   const [blocksLoading, setBlocksLoading] = useState(false);
   // Edit-in-place: the index of the block currently open as raw source (or null).
@@ -1506,6 +1509,32 @@ function App() {
       }
     });
   }, [meta, readonly, enqueue, flushTypingNow, setCaretFromIdx]);
+
+  // Sniff whether the active doc is JSON (extension first, else the first non-space char),
+  // so the Format JSON control only appears where it applies. Re-runs on open/tab switch.
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      if (!meta || readonly) {
+        setDocIsJson(false);
+        return;
+      }
+      const p = (meta.path ?? "").toLowerCase();
+      if (/\.(json|jsonc|json5|geojson|webmanifest)$/.test(p)) {
+        setDocIsJson(true);
+        return;
+      }
+      try {
+        const head = await invoke<string>("read_range", { start: 0, end: Math.min(256, meta.char_count) });
+        if (!cancelled) setDocIsJson(/^\s*[[{]/.test(head));
+      } catch {
+        if (!cancelled) setDocIsJson(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [meta?.path, readonly, activeTabId]);
 
   // Live filter-to-view: show only the lines matching a regex (non-destructive).
   // Works on any size, including the read-only mmap engine, so huge logs filter too.
@@ -2570,7 +2599,7 @@ function App() {
       ...(meta ? [{ label: "Find in file…", hint: combo("F"), kind: C, run: () => openFind(false) }] : []),
       ...(meta ? [{ label: "Go to line…", hint: combo("G"), kind: C, run: () => { setGotoValue(""); setGotoOpen(true); setTimeout(() => gotoInputRef.current?.focus(), 0); } }] : []),
       ...(meta && mdPreviewable ? [{ label: showLive ? "Edit Markdown source" : "Preview Markdown", kind: C, run: () => setEditSource((v) => !v) }] : []),
-      ...(meta && !readonly ? [{ label: "Format JSON (pretty-print)", kind: C, run: () => void formatJson() }] : []),
+      ...(meta && !readonly && docIsJson ? [{ label: "Format JSON (pretty-print)", kind: C, run: () => void formatJson() }] : []),
       ...(meta ? [{ label: "Filter lines to view…", kind: C, run: () => openFilter() }] : []),
       ...(meta?.path ? [{ label: followOn ? "Stop following file" : "Follow file (tail)", kind: C, run: () => toggleFollow() }] : []),
       { label: "Edit highlighters…", kind: C, run: () => { setHlFromSettings(false); setHlEditorOpen(true); } },
@@ -2615,10 +2644,6 @@ function App() {
         <div className="gut-cap">
           <Mark size={20} />
         </div>
-        <button className="gut-dot-btn" onClick={() => void handleNew()} title={`New file (${combo("N")})`}>
-          <span className="gd" />
-          <span className="gd-label">New file</span>
-        </button>
         <button
           className={`gut-dot-btn${leftPanel === "files" ? " on" : ""}`}
           onClick={() => {
@@ -2666,15 +2691,16 @@ function App() {
           <span className="gd" />
           <span className="gd-label">Filter</span>
         </button>
-        <button
-          className="gut-dot-btn"
-          onClick={() => void formatJson()}
-          disabled={!meta || readonly}
-          title="Format JSON (pretty-print)"
-        >
-          <span className="gd" />
-          <span className="gd-label">Format JSON</span>
-        </button>
+        {docIsJson && (
+          <button
+            className="gut-dot-btn"
+            onClick={() => void formatJson()}
+            title="Format JSON (pretty-print)"
+          >
+            <span className="gd" />
+            <span className="gd-label">Format JSON</span>
+          </button>
+        )}
         <button className="gut-dot-btn" onClick={openPalette} title={`Command palette (${combo("P")})`}>
           <span className="gd" />
           <span className="gd-label">Commands</span>

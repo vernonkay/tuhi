@@ -9,10 +9,11 @@ follow [Semantic Versioning](https://semver.org/).
 ### Added
 
 - **New file** (<kbd>Ctrl/Cmd+N</kbd>): opens a fresh, empty, untitled document in its own
-  tab; the first save prompts for a location (Save As). Reachable from the rail, the command
-  palette and the welcome view.
-- A visible **Format JSON** control in the rail — the one-key JSON pretty-print was
-  previously only in the command palette, so it was easy to miss.
+  tab; the first save prompts for a location (Save As). Reachable from <kbd>Ctrl/Cmd+N</kbd>,
+  the command palette and the welcome view.
+- A **Format JSON** control that appears **only when the document is JSON** (by extension or
+  content) — the one-key pretty-print was previously only in the command palette and easy to
+  miss, but it should never be offered on a file it can't apply to.
 
 ### Changed
 
