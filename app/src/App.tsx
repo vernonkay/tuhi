@@ -478,6 +478,12 @@ function App() {
   // Whether the active document looks like JSON, so JSON-only actions (Format JSON) are
   // offered only in context — never on a file they can't apply to.
   const [docIsJson, setDocIsJson] = useState(false);
+  // New untitled documents created as Markdown (Ctrl+N → "Markdown"), keyed by tab id, so the
+  // live preview engages before the file has a .md path. Harmless once the tab is saved (the
+  // path then drives isMarkdown). Tab ids are never reused, so stale entries don't collide.
+  const [untitledKinds, setUntitledKinds] = useState<Record<number, "md" | "txt">>({});
+  const [newFileOpen, setNewFileOpen] = useState(false); // the Ctrl+N file-type picker
+  const reopenAppendRef = useRef(false); // re-open a trailing editor after a block is appended
   const [blocks, setBlocks] = useState<MdBlock[]>([]);
   const [blocksLoading, setBlocksLoading] = useState(false);
   // Edit-in-place: the index of the block currently open as raw source (or null).
@@ -760,7 +766,9 @@ function App() {
 
   const lineCount = meta?.line_count ?? 0;
   const readonly = meta?.readonly ?? false;
-  const isMarkdown = !!meta?.path && /\.(md|markdown|mdx)$/i.test(meta.path);
+  const isMarkdown =
+    (!!meta?.path && /\.(md|markdown|mdx)$/i.test(meta.path)) ||
+    (!meta?.path && activeTabId != null && untitledKinds[activeTabId] === "md");
   // The preview renders eagerly, so it is only offered below the size cap; a larger
   // Markdown file opens in the source editor regardless of the toggle (see the cap note).
   const mdPreviewable = isMarkdown && !readonly && (meta?.char_count ?? 0) <= MD_PREVIEW_MAX_CHARS;
@@ -1223,16 +1231,31 @@ function App() {
     }
   }, [applyTabsState, revealInTree, remember]);
 
-  // New empty, untitled document in its own tab (Ctrl/Cmd+N). It has no path until the
-  // first save, which prompts for one via the Save dialog (see handleSave).
-  const handleNew = useCallback(async () => {
-    setError(null);
-    try {
-      await applyTabsState(await invoke<TabsState>("new_document", { dark: darkRef.current }));
-    } catch (e) {
-      setError(String(e));
-    }
-  }, [applyTabsState]);
+  // New document (Ctrl/Cmd+N): ask for the type first (Markdown vs plain text), because a
+  // Markdown doc opens straight into the live, type-as-you-go editor.
+  const handleNew = useCallback(() => {
+    setNewFileOpen(true);
+  }, []);
+
+  // Create the new untitled doc once a type is chosen. Markdown drops into the live preview
+  // and opens a trailing block to type into; plain text uses the normal source editor.
+  const createNewDoc = useCallback(
+    async (kind: "md" | "txt") => {
+      setNewFileOpen(false);
+      setError(null);
+      try {
+        const ts = await invoke<TabsState>("new_document", { dark: darkRef.current });
+        if (ts.active != null) setUntitledKinds((m) => ({ ...m, [ts.active as number]: kind }));
+        setEditSource(false);
+        await applyTabsState(ts);
+        // For Markdown, open the first block for typing once the (empty) blocks have parsed.
+        if (kind === "md") reopenAppendRef.current = true;
+      } catch (e) {
+        setError(String(e));
+      }
+    },
+    [applyTabsState],
+  );
 
   const handleSave = useCallback(async () => {
     if (!meta) return;
@@ -1242,7 +1265,9 @@ function App() {
     let target: string | null = meta.path;
     const wasUntitled = !target; // a new document being saved for the first time (Save As)
     if (!target) {
-      const chosen = await saveDialog({});
+      // Default a new Markdown doc's name to .md so Save As lands the right extension.
+      const kind = activeTabId != null ? untitledKinds[activeTabId] : undefined;
+      const chosen = await saveDialog(kind === "md" ? { defaultPath: "untitled.md" } : {});
       if (typeof chosen !== "string") return;
       target = chosen;
     }
@@ -1259,7 +1284,7 @@ function App() {
     } catch (e) {
       setError(String(e));
     }
-  }, [meta, flushTypingNow]);
+  }, [meta, flushTypingNow, activeTabId, untitledKinds]);
 
   // On touch devices there is no Ctrl+S, so save the file automatically a short while after
   // edits settle; desktop keeps explicit save. Only a dirty, writable file with a path —
@@ -1883,12 +1908,20 @@ function App() {
   // palette also handle Esc on their own focused inputs; this covers everything else.
   useEffect(() => {
     const anyOpen =
-      settingsOpen || hlEditorOpen || paletteOpen || filterOpen || findOpen || gotoOpen || leftPanel !== null;
+      newFileOpen ||
+      settingsOpen ||
+      hlEditorOpen ||
+      paletteOpen ||
+      filterOpen ||
+      findOpen ||
+      gotoOpen ||
+      leftPanel !== null;
     if (!anyOpen) return;
     const onEsc = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
       e.preventDefault();
-      if (settingsOpen) setSettingsOpen(false);
+      if (newFileOpen) setNewFileOpen(false);
+      else if (settingsOpen) setSettingsOpen(false);
       else if (hlEditorOpen) closeHlEditor();
       else if (paletteOpen) setPaletteOpen(false);
       else if (filterOpen) closeFilter();
@@ -1898,7 +1931,7 @@ function App() {
     };
     window.addEventListener("keydown", onEsc);
     return () => window.removeEventListener("keydown", onEsc);
-  }, [settingsOpen, hlEditorOpen, paletteOpen, filterOpen, findOpen, gotoOpen, leftPanel, closeHlEditor, closeFilter, closeFind, closeGoto]);
+  }, [newFileOpen, settingsOpen, hlEditorOpen, paletteOpen, filterOpen, findOpen, gotoOpen, leftPanel, closeHlEditor, closeFilter, closeFind, closeGoto]);
 
   // Re-run the search as the query or options change while the bar is open.
   useEffect(() => {
@@ -2295,6 +2328,32 @@ function App() {
     }, 0);
   };
 
+  // Open a trailing editor to append the next block (type-as-you-go). The append index is
+  // one past the last block; commitEdit routes it to append_block rather than replace_block.
+  const beginAppend = () => {
+    if (!showLive || readonly) return;
+    skipCommitRef.current = false;
+    const i = blocks.length;
+    editBlockRef.current = i;
+    setEditBlock(i);
+    setTimeout(() => {
+      const ta = editAreaRef.current;
+      if (!ta) return;
+      ta.focus();
+      autosizeEdit(ta);
+    }, 0);
+  };
+
+  // After a block is appended, or a fresh Markdown doc opens, drop a trailing editor in so
+  // typing continues block by block without a click between each.
+  useEffect(() => {
+    if (reopenAppendRef.current && showLive && !readonly) {
+      reopenAppendRef.current = false;
+      beginAppend();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [blocks, showLive, readonly]);
+
   const cancelEdit = () => {
     skipCommitRef.current = true; // the blur that follows must not commit
     editBlockRef.current = null;
@@ -2304,9 +2363,21 @@ function App() {
   const commitEdit = async (value: string) => {
     const i = editBlockRef.current;
     if (i == null) return;
-    const b = blocks[i];
     editBlockRef.current = null; // guard re-entry (the blur after Ctrl+Enter)
     setEditBlock(null);
+    // Appending a new trailing block (index at or past the end): type-as-you-go.
+    if (i >= blocks.length) {
+      if (!value.trim()) return; // nothing typed
+      try {
+        const m = await invoke<DocumentMeta>("append_block", { text: value });
+        setMeta(m); // re-parses the blocks (effect above)
+        reopenAppendRef.current = true; // then open a fresh trailing editor to keep going
+      } catch (e) {
+        console.error("append_block failed", e);
+      }
+      return;
+    }
+    const b = blocks[i];
     if (!b || value === editSeed(b)) return; // unchanged: skip the round-trip
     try {
       const m = await invoke<DocumentMeta>("replace_block", {
@@ -2764,7 +2835,12 @@ function App() {
           </button>
         </div>
       </header>
-      <div className="body">
+      <div
+        className="body"
+        // Expose the docked panel's width to CSS so the Markdown reading column can hold its
+        // screen position while there's margin to consume (see .mdview-inner in App.css).
+        style={leftPanel ? ({ "--panel-w": `${treeWidth}px` } as React.CSSProperties) : undefined}
+      >
       {leftPanel && (
         <aside
           className={`over ${leftPanel === "outline" ? "over-r" : "over-l"}`}
@@ -2994,7 +3070,7 @@ function App() {
       )}
       {showLive ? (
       <div className={`mdview${editBlock != null ? " editing" : ""}`} ref={mdScrollRef} tabIndex={0}>
-        {blocks.length ? (
+        {blocks.length > 0 && (
           <div
             className="mdview-inner"
             onClick={onPreviewClick}
@@ -3018,15 +3094,61 @@ function App() {
               </div>
             ))}
           </div>
-        ) : (
+        )}
+        {blocks.length === 0 && blocksLoading && (
           <div className="mdview-inner">
-            {blocksLoading ? (
-              <p className="md-empty">Rendering…</p>
-            ) : (
-              <p className="md-empty">This document is empty.</p>
-            )}
+            <p className="md-empty">Rendering…</p>
           </div>
         )}
+        {/* Type-as-you-go: a trailing editor to write the next block, or a click-to-add zone. */}
+        {!blocksLoading &&
+          (editBlock != null && editBlock >= blocks.length ? (
+            <div className="mdview-inner md-append">
+              <div className="md-blockedit">
+                <textarea
+                  ref={editAreaRef}
+                  className="md-blockedit-ta"
+                  defaultValue=""
+                  placeholder="Type Markdown…"
+                  spellCheck={false}
+                  onKeyDown={onBlockEditKey}
+                  onBlur={onBlockEditBlur}
+                  onInput={(e) => autosizeEdit(e.currentTarget)}
+                />
+                <div className="md-blockedit-bar">
+                  <button
+                    type="button"
+                    className="be-btn be-cancel"
+                    onPointerDown={(e) => {
+                      e.preventDefault();
+                      swallowClickRef.current = true;
+                      cancelEdit();
+                    }}
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    className="be-btn be-done"
+                    onPointerDown={(e) => {
+                      e.preventDefault();
+                      swallowClickRef.current = true;
+                      void commitEdit(editAreaRef.current?.value ?? "");
+                    }}
+                  >
+                    Done
+                  </button>
+                  <span className="md-blockedit-hint">
+                    <b>{combo("Enter")}</b> render · <b>Esc</b> cancel
+                  </span>
+                </div>
+              </div>
+            </div>
+          ) : (
+            <div className="mdview-inner md-addzone" onClick={() => beginAppend()}>
+              {blocks.length === 0 ? "Type to start writing…" : "+ Add a block"}
+            </div>
+          ))}
       </div>
       ) : (
       <div
@@ -3342,6 +3464,23 @@ function App() {
               <span className="spacer" />
               <button className="find-btn" onClick={() => closeHlEditor()}>
                 Done
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {newFileOpen && (
+        <div className="palette-overlay" onMouseDown={() => setNewFileOpen(false)}>
+          <div className="palette-modal newfile-modal" onMouseDown={(e) => e.stopPropagation()}>
+            <div className="hl-head">New file</div>
+            <div className="newfile-body">
+              <button className="newfile-opt" onClick={() => void createNewDoc("md")} autoFocus>
+                <span className="nf-title">Markdown</span>
+                <span className="nf-sub">Live preview — renders a block at a time as you type (.md)</span>
+              </button>
+              <button className="newfile-opt" onClick={() => void createNewDoc("txt")}>
+                <span className="nf-title">Plain text</span>
+                <span className="nf-sub">A plain editor, no rendering (.txt)</span>
               </button>
             </div>
           </div>

@@ -8,9 +8,14 @@ follow [Semantic Versioning](https://semver.org/).
 
 ### Added
 
-- **New file** (<kbd>Ctrl/Cmd+N</kbd>): opens a fresh, empty, untitled document in its own
-  tab; the first save prompts for a location (Save As). Reachable from <kbd>Ctrl/Cmd+N</kbd>,
-  the command palette and the welcome view.
+- **New file** (<kbd>Ctrl/Cmd+N</kbd>): asks for a type first (Markdown or plain text), then
+  opens a fresh untitled document in its own tab; the first save prompts for a location
+  (Save As, defaulting to `.md` for Markdown). Reachable from <kbd>Ctrl/Cmd+N</kbd>, the
+  command palette and the welcome view.
+- **Type-as-you-go Markdown.** A new Markdown document opens straight into the live preview
+  and renders a block at a time as you write: type a block, <kbd>Ctrl/Cmd+Enter</kbd> (or
+  Done) renders it and drops you into the next. Any `.md` also gets a trailing "add a block"
+  zone to append at the end.
 - A **Format JSON** control that appears **only when the document is JSON** (by extension or
   content) — the one-key pretty-print was previously only in the command palette and easy to
   miss, but it should never be offered on a file it can't apply to.
@@ -21,6 +26,9 @@ follow [Semantic Versioning](https://semver.org/).
   outline panels now take their own column and the editor resizes to fit, so text is no
   longer hidden underneath a panel. On narrow or mobile widths they still float as an
   overlay. This also moves the outline panel out from under the window buttons.
+- **Docking holds the Markdown reading column in place.** When a panel is pinned, it first
+  consumes the empty margin beside the centred reading column, so the text keeps its
+  on-screen position and only shifts once the panel would actually reach it.
 
 ### Fixed
 

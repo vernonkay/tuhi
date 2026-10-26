@@ -845,11 +845,45 @@ html, body, #root {
   max-width: 760px; margin: 0 auto; position: relative;
   font-family: var(--ui-font); color: var(--ink); font-size: 15px; line-height: 1.65;
 }
+/* Eat the margin, hold the text: when a panel is docked (desktop only), the centred reading
+   column keeps its on-screen position by consuming the empty margin on the panel's side,
+   and only shifts once the panel would actually reach the text. The arithmetic: the column's
+   natural side margin is (100% - 760px)/2 within the editor; subtract half the panel width so
+   the column's screen edge stays put, clamped at 0 so it never slides under the panel.
+   --panel-w is set on .body (App.tsx) to the live panel width. */
+@media (min-width: 601px) {
+  .shell:not(.mobile) .body:has(.over-l) .mdview-inner {
+    margin-left: max(0px, calc((100% - 760px) / 2 - var(--panel-w, 0px) / 2));
+    margin-right: auto;
+  }
+  .shell:not(.mobile) .body:has(.over-r) .mdview-inner {
+    margin-right: max(0px, calc((100% - 760px) / 2 - var(--panel-w, 0px) / 2));
+    margin-left: auto;
+  }
+}
 /* One virtualized row per block. `flow-root` contains the block's vertical margins so the
    measured row height includes its spacing (no overlap/gaps); horizontal padding sets the
    text column. Vertical breathing room is the virtualizer's paddingStart/paddingEnd. */
 .md-vrow { display: flow-root; padding: 0 40px; }
 .md-empty { color: var(--slate); font-style: italic; padding: 32px 40px; }
+/* Type-as-you-go: the trailing editor and the click-to-add zone below the rendered blocks. */
+.md-append { padding-top: 4px; }
+.md-addzone {
+  min-height: 38vh; padding: 14px 40px; cursor: text;
+  color: var(--slate); font-size: 13px; opacity: 0.55;
+}
+.md-addzone:hover { opacity: 0.9; }
+/* New-file type picker (Ctrl+N). */
+.newfile-modal { max-width: 440px; }
+.newfile-body { display: flex; flex-direction: column; gap: 10px; padding: 6px 2px 2px; }
+.newfile-opt {
+  display: flex; flex-direction: column; gap: 3px; text-align: left; font: inherit;
+  padding: 12px 14px; border-radius: 10px; border: 1px solid var(--border);
+  background: var(--panel); color: var(--ink); cursor: pointer;
+}
+.newfile-opt:hover, .newfile-opt:focus-visible { border-color: var(--coral); background: var(--coral-soft); outline: none; }
+.nf-title { font-weight: 600; font-size: 14px; }
+.nf-sub { font-size: 12px; color: var(--slate); }
 .md-h {
   font-family: var(--display-font); font-weight: 700; line-height: 1.2;
   letter-spacing: -0.015em; margin: 1.4em 0 0.5em; color: var(--ink); text-wrap: balance;

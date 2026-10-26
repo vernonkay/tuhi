@@ -1713,6 +1713,19 @@ pub fn replace_block(
         .replace_line_range(start_line, end_line, &text)
 }
 
+/// Append `text` as a new block at the end of the active document (the type-as-you-go
+/// Markdown flow, for a new or continuing document). A blank line separates it from any
+/// existing content so it parses as its own block. Returns the new meta so the front end
+/// re-parses the live preview.
+#[tauri::command]
+pub fn append_block(text: String, state: State<EditorState>) -> Result<DocumentMeta, EditorError> {
+    let mut reg = state.0.lock().map_err(|_| EditorError::LockPoisoned)?;
+    let b = reg.active_buffer_mut()?;
+    let end = b.meta().char_count;
+    let payload = if end > 0 { format!("\n\n{text}") } else { text };
+    b.insert(end, &payload)
+}
+
 #[derive(Serialize)]
 pub struct ReplaceResult {
     pub meta: DocumentMeta,
