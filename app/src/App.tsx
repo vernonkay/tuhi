@@ -265,6 +265,31 @@ const HIGHLIGHT_MAX_CHARS = 2 * 1024 * 1024;
 // see the roadmap.) 5 MB comfortably covers large real documents, e.g. a 4 MB export.
 const MD_PREVIEW_MAX_CHARS = 5 * 1024 * 1024;
 
+// Save-As type list, so a new document can be saved as a specific type (and gets the right
+// extension) instead of only "All files". The chosen new-file kind is floated to the top so
+// it's the dialog's default; everything else stays pickable from the dropdown.
+const SAVE_FILTERS: { name: string; extensions: string[] }[] = [
+  { name: "Markdown", extensions: ["md", "markdown"] },
+  { name: "Plain text", extensions: ["txt"] },
+  { name: "JSON", extensions: ["json"] },
+  { name: "HTML", extensions: ["html", "htm"] },
+  { name: "CSS", extensions: ["css"] },
+  { name: "JavaScript", extensions: ["js", "mjs", "cjs"] },
+  { name: "TypeScript", extensions: ["ts", "tsx"] },
+  { name: "YAML", extensions: ["yaml", "yml"] },
+  { name: "TOML", extensions: ["toml"] },
+  { name: "XML", extensions: ["xml"] },
+  { name: "CSV", extensions: ["csv"] },
+  { name: "Log", extensions: ["log"] },
+  { name: "All files", extensions: ["*"] },
+];
+function saveFiltersFor(kind: "md" | "txt" | undefined) {
+  if (!kind) return SAVE_FILTERS;
+  const want = kind === "md" ? "Markdown" : "Plain text";
+  const pick = SAVE_FILTERS.find((f) => f.name === want);
+  return pick ? [pick, ...SAVE_FILTERS.filter((f) => f !== pick)] : SAVE_FILTERS;
+}
+
 /** Platform-appropriate shortcut label: "⌘O" on macOS, "Ctrl+O" elsewhere. */
 const IS_MAC =
   typeof navigator !== "undefined" && /Mac|iPhone|iPad|iPod/.test(navigator.platform || navigator.userAgent || "");
@@ -1265,9 +1290,13 @@ function App() {
     let target: string | null = meta.path;
     const wasUntitled = !target; // a new document being saved for the first time (Save As)
     if (!target) {
-      // Default a new Markdown doc's name to .md so Save As lands the right extension.
+      // Offer a real type list (so you can pick JSON/HTML/etc.), with the new-file kind's type
+      // as the default and a matching default name.
       const kind = activeTabId != null ? untitledKinds[activeTabId] : undefined;
-      const chosen = await saveDialog(kind === "md" ? { defaultPath: "untitled.md" } : {});
+      const chosen = await saveDialog({
+        defaultPath: kind === "md" ? "untitled.md" : kind === "txt" ? "untitled.txt" : undefined,
+        filters: saveFiltersFor(kind),
+      });
       if (typeof chosen !== "string") return;
       target = chosen;
     }
@@ -2396,11 +2425,26 @@ function App() {
       e.preventDefault();
       e.stopPropagation();
       cancelEdit();
-    } else if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+      return;
+    }
+    if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
       e.preventDefault();
       void commitEdit(e.currentTarget.value);
+      return;
     }
-    // Plain Enter and everything else stay in the textarea (a block may be multi-line).
+    // Type-as-you-go: while writing a new trailing block, a blank line ends it (Markdown's own
+    // block rule), so you flow straight into the next block without reaching for Ctrl+Enter.
+    // Single Enter still adds a line within the block (lists, code); Shift+Enter always does.
+    if (e.key === "Enter" && !e.shiftKey && editBlockRef.current != null && editBlockRef.current >= blocks.length) {
+      const ta = e.currentTarget;
+      const caret = ta.selectionStart;
+      const atBlankLine = caret > 0 && ta.value[caret - 1] === "\n";
+      if (atBlankLine && ta.value.slice(0, caret).trim() !== "") {
+        e.preventDefault();
+        void commitEdit(ta.value.replace(/\n+$/, ""));
+      }
+    }
+    // Plain Enter otherwise stays in the textarea (a block may be multi-line).
   };
 
   const onBlockEditBlur = (e: React.FocusEvent<HTMLTextAreaElement>) => {

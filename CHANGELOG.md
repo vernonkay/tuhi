@@ -13,9 +13,13 @@ follow [Semantic Versioning](https://semver.org/).
   (Save As, defaulting to `.md` for Markdown). Reachable from <kbd>Ctrl/Cmd+N</kbd>, the
   command palette and the welcome view.
 - **Type-as-you-go Markdown.** A new Markdown document opens straight into the live preview
-  and renders a block at a time as you write: type a block, <kbd>Ctrl/Cmd+Enter</kbd> (or
-  Done) renders it and drops you into the next. Any `.md` also gets a trailing "add a block"
-  zone to append at the end.
+  and renders a block at a time as you write: type a block and end it with a **blank line**
+  (Markdown's own block rule) — or <kbd>Ctrl/Cmd+Enter</kbd> — and it renders, dropping you
+  into the next. Single <kbd>Enter</kbd> still adds a line within a block (lists, code). Any
+  `.md` also gets a trailing "add a block" zone to append at the end.
+- **Save As offers a file-type list** (Markdown, Plain text, JSON, HTML, CSS, JS/TS, YAML,
+  TOML, XML, CSV, Log, …) so a new document saves with the right extension instead of only
+  "All files"; the new-file type is the default.
 - A **Format JSON** control that appears **only when the document is JSON** (by extension or
   content) — the one-key pretty-print was previously only in the command palette and easy to
   miss, but it should never be offered on a file it can't apply to.
