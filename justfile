@@ -29,6 +29,10 @@ test:
 check:
     bash scripts/check/run-checks.sh
 
+# End-of-phase gate: checks + Rust tests + front-end UI tests + release build
+verify:
+    bash scripts/verify.sh
+
 # Fix formatting locally (CI only checks, never fixes)
 fmt:
     cd app/src-tauri && cargo fmt
