@@ -1146,6 +1146,15 @@ button,
   color: var(--ink); background: var(--panel);
   border: 1px solid var(--coral); border-radius: 8px; padding: 10px 12px; outline: none;
 }
+/* Seamless live preview (desktop): the active block reads as inline source — a soft tint and a
+   coral edge bar mark the line you are on (matching the hover affordance), the text stays aligned
+   with the rendered column, and there is no boxed editor. Touch builds keep the box + Done/Cancel
+   bar above, since they have no hardware arrows to cross block boundaries with. */
+.shell:not(.mobile) .md-blockedit-ta {
+  width: auto; margin: 0 -6px; padding: 3px 6px;
+  border: none; border-radius: 6px;
+  background: var(--coral-soft); box-shadow: inset 3px 0 0 var(--coral);
+}
 .md-blockedit-hint {
   margin-top: 4px; font-family: var(--ui-font); font-size: 11px; color: var(--slate);
 }

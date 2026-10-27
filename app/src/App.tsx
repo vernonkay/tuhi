@@ -509,6 +509,9 @@ function App() {
   const [untitledKinds, setUntitledKinds] = useState<Record<number, "md" | "txt">>({});
   const [newFileOpen, setNewFileOpen] = useState(false); // the Ctrl+N file-type picker
   const reopenAppendRef = useRef(false); // re-open a trailing editor after a block is appended
+  // Seamless live preview: after a commit re-parses the blocks, open this block as source next
+  // (set by arrow-navigation across a block boundary; consumed by the blocks effect).
+  const pendingOpenRef = useRef<{ index: number; col: number; fromBelow: boolean } | null>(null);
   const [blocks, setBlocks] = useState<MdBlock[]>([]);
   const [blocksLoading, setBlocksLoading] = useState(false);
   // Edit-in-place: the index of the block currently open as raw source (or null).
@@ -2340,20 +2343,39 @@ function App() {
   // (so no dangling blank line); Rust restores the terminator on write-back.
   const editSeed = (b: MdBlock) => b.source.replace(/\n$/, "");
 
-  const beginEdit = (i: number) => {
+  // Place the caret inside the just-mounted block editor: at a column on the first or last line
+  // (arrow navigation arriving from the adjacent block), otherwise at the end (click / default).
+  const placeInTa = (ta: HTMLTextAreaElement, place?: { col?: number; fromBelow?: boolean }) => {
+    ta.focus();
+    autosizeEdit(ta);
+    const v = ta.value;
+    if (place?.col != null) {
+      if (place.fromBelow) {
+        const lineStart = v.lastIndexOf("\n") + 1; // last line (arrived going up)
+        const off = lineStart + Math.min(place.col, v.length - lineStart);
+        ta.setSelectionRange(off, off);
+      } else {
+        const firstNl = v.indexOf("\n"); // first line (arrived going down)
+        const lineLen = firstNl === -1 ? v.length : firstNl;
+        const off = Math.min(place.col, lineLen);
+        ta.setSelectionRange(off, off);
+      }
+      return;
+    }
+    const n = v.length;
+    ta.setSelectionRange(n, n);
+  };
+
+  const beginEdit = (i: number, place?: { col?: number; fromBelow?: boolean }) => {
     if (!showLive || i < 0 || i >= blocks.length) return;
     skipCommitRef.current = false;
     editBlockRef.current = i;
     setEditBlock(i);
-    // Focus, size and place the caret at the end once the textarea has mounted
-    // (same deferred-focus pattern as the go-to-line and find inputs).
+    // Focus, size and place the caret once the textarea has mounted (same deferred-focus
+    // pattern as the go-to-line and find inputs).
     setTimeout(() => {
       const ta = editAreaRef.current;
-      if (!ta) return;
-      ta.focus();
-      autosizeEdit(ta);
-      const n = ta.value.length;
-      ta.setSelectionRange(n, n);
+      if (ta) placeInTa(ta, place);
     }, 0);
   };
 
@@ -2376,9 +2398,16 @@ function App() {
   // After a block is appended, or a fresh Markdown doc opens, drop a trailing editor in so
   // typing continues block by block without a click between each.
   useEffect(() => {
-    if (reopenAppendRef.current && showLive && !readonly) {
+    if (!showLive || readonly) return;
+    if (reopenAppendRef.current) {
       reopenAppendRef.current = false;
       beginAppend();
+      return;
+    }
+    if (pendingOpenRef.current) {
+      const p = pendingOpenRef.current;
+      pendingOpenRef.current = null;
+      if (p.index < blocks.length) beginEdit(p.index, { col: p.col, fromBelow: p.fromBelow });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [blocks, showLive, readonly]);
@@ -2389,25 +2418,28 @@ function App() {
     setEditBlock(null);
   };
 
-  const commitEdit = async (value: string) => {
+  // Returns true if the commit issued a write and the blocks will re-parse (so a follow-up open
+  // must wait for the new blocks), false if it was a no-op (unchanged / empty — open now).
+  const commitEdit = async (value: string): Promise<boolean> => {
     const i = editBlockRef.current;
-    if (i == null) return;
+    if (i == null) return false;
     editBlockRef.current = null; // guard re-entry (the blur after Ctrl+Enter)
     setEditBlock(null);
     // Appending a new trailing block (index at or past the end): type-as-you-go.
     if (i >= blocks.length) {
-      if (!value.trim()) return; // nothing typed
+      if (!value.trim()) return false; // nothing typed
       try {
         const m = await invoke<DocumentMeta>("append_block", { text: value });
         setMeta(m); // re-parses the blocks (effect above)
         reopenAppendRef.current = true; // then open a fresh trailing editor to keep going
+        return true;
       } catch (e) {
         console.error("append_block failed", e);
+        return false;
       }
-      return;
     }
     const b = blocks[i];
-    if (!b || value === editSeed(b)) return; // unchanged: skip the round-trip
+    if (!b || value === editSeed(b)) return false; // unchanged: skip the round-trip
     try {
       const m = await invoke<DocumentMeta>("replace_block", {
         startLine: b.start_line,
@@ -2415,9 +2447,27 @@ function App() {
         text: value,
       });
       setMeta(m); // the char_count change re-parses the blocks (effect above)
+      return true;
     } catch (e) {
       console.error("replace_block failed", e);
+      return false;
     }
+  };
+
+  // Seamless live preview: moving the caret past the top or bottom edge of the active block
+  // commits it (so it renders) and opens the adjacent block as source at the same column — this
+  // is what makes the whole document feel like one editing surface rather than a stack of boxes.
+  const moveToBlock = async (value: string, targetIndex: number, col: number, fromBelow: boolean) => {
+    const reparsed = await commitEdit(value);
+    if (targetIndex < 0) return; // above the first block: leave it rendered, no active block
+    if (targetIndex >= blocks.length) {
+      // past the last block: keep writing in a fresh trailing editor (type-as-you-go)
+      if (reparsed) reopenAppendRef.current = true;
+      else beginAppend();
+      return;
+    }
+    if (reparsed) pendingOpenRef.current = { index: targetIndex, col, fromBelow };
+    else beginEdit(targetIndex, { col, fromBelow });
   };
 
   const onBlockEditKey = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -2431,6 +2481,33 @@ function App() {
       e.preventDefault();
       void commitEdit(e.currentTarget.value);
       return;
+    }
+    // Seamless navigation: an arrow past the block's top or bottom edge carries the caret into
+    // the adjacent block (which opens as source), so the cursor flows through the whole document.
+    if (
+      !IS_MOBILE &&
+      !e.shiftKey &&
+      !e.ctrlKey &&
+      !e.metaKey &&
+      !e.altKey &&
+      (e.key === "ArrowDown" || e.key === "ArrowUp")
+    ) {
+      const ta = e.currentTarget;
+      const i = editBlockRef.current;
+      if (i != null) {
+        const caret = ta.selectionStart;
+        if (e.key === "ArrowDown" && ta.value.indexOf("\n", caret) === -1) {
+          e.preventDefault();
+          const lineStart = ta.value.lastIndexOf("\n", caret - 1) + 1;
+          void moveToBlock(ta.value, i + 1, caret - lineStart, false);
+          return;
+        }
+        if (e.key === "ArrowUp" && ta.value.lastIndexOf("\n", caret - 1) === -1) {
+          e.preventDefault();
+          void moveToBlock(ta.value, i - 1, caret, true);
+          return;
+        }
+      }
     }
     // Type-as-you-go: while writing a new trailing block, a blank line ends it (Markdown's own
     // block rule), so you flow straight into the next block without reaching for Ctrl+Enter.
@@ -2608,33 +2685,35 @@ function App() {
             onBlur={onBlockEditBlur}
             onInput={(e) => autosizeEdit(e.currentTarget)}
           />
-          <div className="md-blockedit-bar">
-            <button
-              type="button"
-              className="be-btn be-cancel"
-              onPointerDown={(e) => {
-                e.preventDefault();
-                swallowClickRef.current = true;
-                cancelEdit();
-              }}
-            >
-              Cancel
-            </button>
-            <button
-              type="button"
-              className="be-btn be-done"
-              onPointerDown={(e) => {
-                e.preventDefault();
-                swallowClickRef.current = true;
-                void commitEdit(editAreaRef.current?.value ?? "");
-              }}
-            >
-              Done
-            </button>
-            <span className="md-blockedit-hint">
-              <b>{combo("Enter")}</b> · <b>Esc</b>
-            </span>
-          </div>
+          {IS_MOBILE && (
+            <div className="md-blockedit-bar">
+              <button
+                type="button"
+                className="be-btn be-cancel"
+                onPointerDown={(e) => {
+                  e.preventDefault();
+                  swallowClickRef.current = true;
+                  cancelEdit();
+                }}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="be-btn be-done"
+                onPointerDown={(e) => {
+                  e.preventDefault();
+                  swallowClickRef.current = true;
+                  void commitEdit(editAreaRef.current?.value ?? "");
+                }}
+              >
+                Done
+              </button>
+              <span className="md-blockedit-hint">
+                <b>{combo("Enter")}</b> · <b>Esc</b>
+              </span>
+            </div>
+          )}
         </div>
       );
     }
@@ -3159,33 +3238,35 @@ function App() {
                   onBlur={onBlockEditBlur}
                   onInput={(e) => autosizeEdit(e.currentTarget)}
                 />
-                <div className="md-blockedit-bar">
-                  <button
-                    type="button"
-                    className="be-btn be-cancel"
-                    onPointerDown={(e) => {
-                      e.preventDefault();
-                      swallowClickRef.current = true;
-                      cancelEdit();
-                    }}
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    type="button"
-                    className="be-btn be-done"
-                    onPointerDown={(e) => {
-                      e.preventDefault();
-                      swallowClickRef.current = true;
-                      void commitEdit(editAreaRef.current?.value ?? "");
-                    }}
-                  >
-                    Done
-                  </button>
-                  <span className="md-blockedit-hint">
-                    <b>{combo("Enter")}</b> render · <b>Esc</b> cancel
-                  </span>
-                </div>
+                {IS_MOBILE && (
+                  <div className="md-blockedit-bar">
+                    <button
+                      type="button"
+                      className="be-btn be-cancel"
+                      onPointerDown={(e) => {
+                        e.preventDefault();
+                        swallowClickRef.current = true;
+                        cancelEdit();
+                      }}
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="button"
+                      className="be-btn be-done"
+                      onPointerDown={(e) => {
+                        e.preventDefault();
+                        swallowClickRef.current = true;
+                        void commitEdit(editAreaRef.current?.value ?? "");
+                      }}
+                    >
+                      Done
+                    </button>
+                    <span className="md-blockedit-hint">
+                      <b>{combo("Enter")}</b> render · <b>Esc</b> cancel
+                    </span>
+                  </div>
+                )}
               </div>
             </div>
           ) : (
