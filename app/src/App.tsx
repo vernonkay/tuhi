@@ -476,9 +476,9 @@ function App() {
     }
   });
 
-  // Studio chrome: one left panel showing Files OR Outline (rail switches it), plus
-  // the command palette. `null` = the left panel is collapsed.
-  const [leftPanel, setLeftPanel] = useState<"files" | "outline" | null>(null);
+  // Studio chrome: one left panel showing Files, Outline, or the Data panel (rail switches it),
+  // plus the command palette. `null` = the left panel is collapsed.
+  const [leftPanel, setLeftPanel] = useState<"files" | "outline" | "data" | null>(null);
   const [treeWidth, setTreeWidth] = useState<number>(() => {
     try {
       const w = Number(localStorage.getItem("tuhi.treeWidth"));
@@ -527,7 +527,13 @@ function App() {
   const [filterOpen, setFilterOpen] = useState(false);
   const [filterQuery, setFilterQuery] = useState("");
   const [filterMatches, setFilterMatches] = useState<FilterMatch[]>([]);
+  const [filterCase, setFilterCase] = useState(false); // case-sensitive filter (data mode)
   const [followOn, setFollowOn] = useState(false);
+  // Data mode: a "lens" over logs and large files that surfaces filter / tail / highlight
+  // in place (a top bar on the editor, a floating LIVE badge, and gutter stripes) with a
+  // side panel for managing highlight rules and reading stats. Auto-on for the large-file
+  // engine and for data/log extensions; the rail "Data" dot toggles it by hand.
+  const [dataMode, setDataMode] = useState(false);
   const [hlEditorOpen, setHlEditorOpen] = useState(false);
   const [hlFromSettings, setHlFromSettings] = useState(false); // did the rules editor open from Settings?
   const [highlighters, setHighlighters] = useState<{ pattern: string; color: string }[]>(() => {
@@ -805,6 +811,15 @@ function App() {
   // read-only files always use the plain editor (there is nothing to render, or it would
   // not scale).
   const showLive = !editSource && !!meta && mdPreviewable;
+
+  // Data-ish files: the large-file engine (read-only mmap) or a log/data extension. Used to
+  // auto-engage data mode on open. `dataMode` is the live switch (auto-set, hand-toggleable);
+  // the lens only shows on the plain editor (never over the Markdown preview).
+  const isDataFile =
+    readonly || (!!meta?.path && /\.(log|ndjson|jsonl|csv|tsv|tab|out|err)$/i.test(meta.path));
+  const lensActive = dataMode && !showLive && !!meta;
+  // The lens collapses the editor to matches while its filter box has a query.
+  const lensFiltering = lensActive && filterQuery.trim().length > 0;
 
   // Virtualize the preview: only the blocks on screen become DOM nodes, so the preview
   // scales to any block count (the char cap bounds parse/transfer cost, not render). Rows
@@ -1603,13 +1618,13 @@ function App() {
       }
       try {
         setFilterMatches(
-          await invoke<FilterMatch[]>("filter_lines", { query: q, useRegex: true, caseSensitive: false }),
+          await invoke<FilterMatch[]>("filter_lines", { query: q, useRegex: true, caseSensitive: filterCase }),
         );
       } catch {
         setFilterMatches([]); // invalid regex (mid-typing) → show nothing yet
       }
     },
-    [meta],
+    [meta, filterCase],
   );
 
   const openFilter = useCallback(() => {
@@ -1970,12 +1985,21 @@ function App() {
     if (findOpen) void runSearch(findQuery);
   }, [findQuery, useRegex, caseSensitive, findOpen, runSearch]);
 
-  // Debounced live filter as the filter query changes.
+  // Debounced live filter as the filter query (or case option) changes, for both the classic
+  // filter overlay and the data-mode lens.
   useEffect(() => {
-    if (!filterOpen) return;
+    if (!filterOpen && !lensActive) return;
     const t = setTimeout(() => void runFilter(filterQuery), 150);
     return () => clearTimeout(t);
-  }, [filterQuery, filterOpen, runFilter]);
+  }, [filterQuery, filterCase, filterOpen, lensActive, runFilter]);
+
+  // Auto-engage data mode when the active file changes: on for the large-file engine and for
+  // log/data extensions, off otherwise. Keyed on the path + engine only (not char_count), so a
+  // hand toggle survives editing and only a tab switch / reopen recomputes it.
+  useEffect(() => {
+    setDataMode(isDataFile);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [meta?.path, readonly]);
 
   // Session restore on mount. If the Rust process still has tabs (a dev hot-reload),
   // adopt them. Otherwise (a real restart) reopen the files that were open last time,
@@ -2795,6 +2819,7 @@ function App() {
       ...(meta && mdPreviewable ? [{ label: showLive ? "Edit Markdown source" : "Preview Markdown", kind: C, run: () => setEditSource((v) => !v) }] : []),
       ...(meta && !readonly && docIsJson ? [{ label: "Format JSON (pretty-print)", kind: C, run: () => void formatJson() }] : []),
       ...(meta ? [{ label: "Filter lines to view…", kind: C, run: () => openFilter() }] : []),
+      ...(meta ? [{ label: dataMode ? "Exit data mode" : "Data mode (filter · tail · highlight)", kind: C, run: () => setDataMode((v) => !v) }] : []),
       ...(meta?.path ? [{ label: followOn ? "Stop following file" : "Follow file (tail)", kind: C, run: () => toggleFollow() }] : []),
       { label: "Edit highlighters…", kind: C, run: () => { setHlFromSettings(false); setHlEditorOpen(true); } },
       { label: "Settings…", kind: C, run: () => setSettingsOpen(true) },
@@ -2831,6 +2856,173 @@ function App() {
       }
     }
   };
+
+  // The collapse-to-matches list, shared by the classic filter overlay and the data-mode lens.
+  // `onPick` decides what a row click does (close the overlay, or clear the lens, then jump).
+  const renderFilterList = (onPick: (line: number) => void): React.ReactNode => (
+    <div className="filter-list">
+      {filterMatches.length ? (
+        filterMatches.map((m) => {
+          const hl = lineHighlight(m.text);
+          return (
+            <div
+              key={m.line}
+              className="filter-row"
+              style={hl ? { boxShadow: `inset 3px 0 0 ${hl}`, background: `${hl}14` } : undefined}
+              onClick={() => onPick(m.line)}
+              title={`Go to line ${m.line + 1}`}
+            >
+              <span className="filter-gutter">{m.line + 1}</span>
+              <span className="filter-text">
+                {renderLine(m.text.replace(/\r?\n$/, ""), [])}
+                {m.truncated && <span className="trunc"> ⋯</span>}
+              </span>
+            </div>
+          );
+        })
+      ) : (
+        <div className="filter-empty">
+          {filterQuery
+            ? "No matching lines"
+            : "Type a regex to collapse the document to just the matching lines."}
+        </div>
+      )}
+    </div>
+  );
+
+  // The data-mode lens bar: filter box, case toggle, tail, match count, and a button to the
+  // Data panel (highlight rules + stats). Sits above the editor; the gutter stripes and the
+  // LIVE badge complete the lens.
+  const lensBar = (
+    <div className="lensbar">
+      <span className="lens-tag">DATA</span>
+      <input
+        className="lens-input"
+        placeholder="Filter lines by regex (e.g. ERROR|WARN)…"
+        value={filterQuery}
+        onChange={(e) => setFilterQuery(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Escape") {
+            e.preventDefault();
+            setFilterQuery("");
+            scrollerRef.current?.focus();
+          }
+        }}
+      />
+      <button
+        className={`lens-btn${filterCase ? " on" : ""}`}
+        onClick={() => setFilterCase((v) => !v)}
+        title="Match case"
+      >
+        Aa
+      </button>
+      {meta?.path && (
+        <button
+          className={`lens-btn tail${followOn ? " on" : ""}`}
+          onClick={toggleFollow}
+          title="Follow the file as it grows (tail -f)"
+        >
+          {followOn ? "● Tail" : "Tail"}
+        </button>
+      )}
+      <span className="lens-count">
+        {lensFiltering
+          ? filterMatches.length >= 1000
+            ? "1000+ matches"
+            : `${filterMatches.length} match${filterMatches.length === 1 ? "" : "es"}`
+          : `${lineCount.toLocaleString()} lines`}
+      </span>
+      <button
+        className={`lens-btn${leftPanel === "data" ? " on" : ""}`}
+        onClick={() => setLeftPanel((v) => (v === "data" ? null : "data"))}
+        title="Highlight rules & stats"
+      >
+        Rules
+      </button>
+    </div>
+  );
+
+  // The thin "rail panel" half of data mode: manage highlight rules, the filter case option,
+  // and read live stats. Opened from the lens bar's Rules button (or the rail), it reuses the
+  // docked-panel chrome (so the reading column holds its place).
+  const dataPanel = (
+    <>
+      <div className="op-head" style={{ display: "flex", alignItems: "center" }}>
+        Data
+        <button className="over-close" style={{ marginLeft: "auto" }} onClick={() => setLeftPanel(null)} title="Close">×</button>
+      </div>
+      <div className="dp-body">
+        <div className="dp-sec">
+          <div className="dp-label">Highlight rules</div>
+          {highlighters.length ? (
+            highlighters.map((h, i) => (
+              <div className="hl-row" key={i}>
+                <input
+                  className="hl-pattern"
+                  value={h.pattern}
+                  placeholder="regex, e.g. ERROR|fatal"
+                  onChange={(e) =>
+                    setHighlighters((rs) => rs.map((r, j) => (j === i ? { ...r, pattern: e.target.value } : r)))
+                  }
+                />
+                <input
+                  className="hl-color"
+                  type="color"
+                  value={h.color}
+                  onChange={(e) =>
+                    setHighlighters((rs) => rs.map((r, j) => (j === i ? { ...r, color: e.target.value } : r)))
+                  }
+                />
+                <button
+                  className="hl-del"
+                  title="Remove rule"
+                  onClick={() => setHighlighters((rs) => rs.filter((_, j) => j !== i))}
+                >
+                  ×
+                </button>
+              </div>
+            ))
+          ) : (
+            <p className="dp-empty">No rules yet — add one to tint matching lines.</p>
+          )}
+          <button
+            className="dp-add"
+            onClick={() => setHighlighters((rs) => [...rs, { pattern: "", color: "#ff5a36" }])}
+          >
+            + Add rule
+          </button>
+        </div>
+        <div className="dp-sec">
+          <div className="dp-label">Filter</div>
+          <label className="dp-check">
+            <input type="checkbox" checked={filterCase} onChange={(e) => setFilterCase(e.target.checked)} />
+            Match case
+          </label>
+        </div>
+        <div className="dp-sec">
+          <div className="dp-label">Stats</div>
+          <div className="dp-stat"><span>Lines</span><b>{lineCount.toLocaleString()}</b></div>
+          <div className="dp-stat"><span>Characters</span><b>{(meta?.char_count ?? 0).toLocaleString()}</b></div>
+          {lensFiltering && (
+            <div className="dp-stat"><span>Matches</span><b>{filterMatches.length >= 1000 ? "1000+" : filterMatches.length.toLocaleString()}</b></div>
+          )}
+          <div className="dp-stat"><span>Engine</span><b>{readonly ? "memory-mapped" : "in-memory"}</b></div>
+        </div>
+      </div>
+    </>
+  );
+
+  // The floating LIVE / Tail badge, bottom-right of the editor, the last piece of the lens.
+  const liveBadge = (
+    <button
+      className={`live-badge${followOn ? " on" : ""}`}
+      onClick={toggleFollow}
+      title={followOn ? "Following (tail -f) — click to stop" : "Follow the file as it grows (tail -f)"}
+    >
+      <span className="lb-dot" />
+      {followOn ? "LIVE" : "Tail"}
+    </button>
+  );
 
   return (
     <div className={`shell tg${IS_MOBILE ? " mobile" : ""}`}>
@@ -2884,6 +3076,15 @@ function App() {
         >
           <span className="gd" />
           <span className="gd-label">Filter</span>
+        </button>
+        <button
+          className={`gut-dot-btn${dataMode ? " on" : ""}`}
+          onClick={() => setDataMode((v) => !v)}
+          disabled={!meta}
+          title="Data mode — filter · tail · highlight for logs & big files"
+        >
+          <span className="gd" />
+          <span className="gd-label">Data</span>
         </button>
         {docIsJson && (
           <button
@@ -3027,6 +3228,8 @@ function App() {
                 )}
               </div>
             </>
+          ) : leftPanel === "data" ? (
+            dataPanel
           ) : (
             <>
               <div className="op-head" style={{ display: "flex", alignItems: "center" }}>
@@ -3191,6 +3394,7 @@ function App() {
           </button>
         </div>
       )}
+      {lensActive && lensBar}
       {showLive ? (
       <div className={`mdview${editBlock != null ? " editing" : ""}`} ref={mdScrollRef} tabIndex={0}>
         {blocks.length > 0 && (
@@ -3275,6 +3479,14 @@ function App() {
             </div>
           ))}
       </div>
+      ) : lensFiltering ? (
+      <div className="filter-view lens-list">
+        {renderFilterList((line) => {
+          // Clearing the query remounts the scroller; jump once it's back so the viewport scrolls.
+          setFilterQuery("");
+          setTimeout(() => void jumpToLine(line), 0);
+        })}
+      </div>
       ) : (
       <div
         className="scroller"
@@ -3351,6 +3563,7 @@ function App() {
         )}
       </div>
       )}
+      {lensActive && meta?.path && liveBadge}
       {filterOpen && (
         <div className="filter-view">
           <div className="filter-bar">
@@ -3376,37 +3589,10 @@ function App() {
               ✕
             </button>
           </div>
-          <div className="filter-list">
-            {filterMatches.length ? (
-              filterMatches.map((m) => {
-                const hl = lineHighlight(m.text);
-                return (
-                  <div
-                    key={m.line}
-                    className="filter-row"
-                    style={hl ? { boxShadow: `inset 3px 0 0 ${hl}`, background: `${hl}14` } : undefined}
-                    onClick={() => {
-                      closeFilter();
-                      void jumpToLine(m.line);
-                    }}
-                    title={`Go to line ${m.line + 1}`}
-                  >
-                    <span className="filter-gutter">{m.line + 1}</span>
-                    <span className="filter-text">
-                      {renderLine(m.text.replace(/\r?\n$/, ""), [])}
-                      {m.truncated && <span className="trunc"> ⋯</span>}
-                    </span>
-                  </div>
-                );
-              })
-            ) : (
-              <div className="filter-empty">
-                {filterQuery
-                  ? "No matching lines"
-                  : "Type a regex to collapse the document to just the matching lines."}
-              </div>
-            )}
-          </div>
+          {renderFilterList((line) => {
+            closeFilter();
+            void jumpToLine(line);
+          })}
         </div>
       )}
       </div>

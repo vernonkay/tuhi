@@ -1181,3 +1181,115 @@ button,
 .recovery-btn.ghost { background: transparent; color: var(--slate); border-color: var(--border); }
 .recovery-btn:hover { filter: brightness(1.05); }
 .recovery-btn.ghost:hover { color: var(--ink); border-color: var(--slate); }
+
+/* ---- Data mode: the "lens" (filter bar + LIVE badge, gutter stripes reuse .line) and the
+   thin Data panel (highlight rules + stats). Everything uses the chrome tokens, so it tracks
+   the light/dark theme without extra rules. ---- */
+.lensbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel);
+  flex: 0 0 auto;
+}
+.lens-tag {
+  font-family: var(--mono-font);
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  color: var(--coral);
+  border: 1px solid var(--coral);
+  border-radius: 5px;
+  padding: 2px 7px;
+  flex: 0 0 auto;
+}
+.lens-input {
+  flex: 1;
+  min-width: 0;
+  font: inherit;
+  font-size: 13px;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--paper);
+  color: var(--ink);
+}
+.lens-input:focus { outline: none; border-color: var(--coral); }
+.lens-btn {
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  padding: 4px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--paper);
+  color: var(--slate);
+  flex: 0 0 auto;
+}
+.lens-btn:hover { border-color: var(--coral); color: var(--coral); }
+.lens-btn.on { background: var(--coral-soft); border-color: var(--coral); color: var(--coral); }
+.lens-btn.tail.on { background: rgba(47, 143, 78, 0.14); border-color: #2f8f4e; color: #2f8f4e; }
+.lens-count { font-size: 12px; color: var(--slate); flex: 0 0 auto; margin-left: auto; }
+
+/* The lens collapse-list flows inline below the bar instead of overlaying (unlike the
+   classic filter overlay, which stays absolute over a still-mounted scroller). */
+.filter-view.lens-list {
+  position: static;
+  inset: auto;
+  z-index: auto;
+  flex: 1;
+  min-height: 0;
+}
+
+/* Floating LIVE / Tail badge, bottom-right of the editor. */
+.live-badge {
+  position: absolute;
+  right: 16px;
+  bottom: 14px;
+  z-index: 6;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-family: var(--mono-font);
+  font-size: 11px;
+  cursor: pointer;
+  padding: 4px 11px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--paper);
+  color: var(--slate);
+  box-shadow: 0 4px 14px rgba(20, 22, 28, 0.14);
+}
+.live-badge:hover { border-color: var(--coral); color: var(--coral); }
+.live-badge .lb-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--slate); }
+.live-badge.on { color: #2f8f4e; border-color: rgba(47, 143, 78, 0.5); }
+.live-badge.on .lb-dot { background: #2f8f4e; animation: tuhi-pulse 1.1s infinite; }
+@keyframes tuhi-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.25; } }
+
+/* Data panel (reuses .over / .op-head chrome from the outline panel). */
+.dp-body { flex: 1; overflow: auto; padding: 8px 10px; display: flex; flex-direction: column; gap: 18px; }
+.dp-sec { display: flex; flex-direction: column; gap: 7px; }
+.dp-label {
+  font-family: var(--mono-font);
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--slate);
+}
+.dp-empty { color: var(--slate); font-size: 12px; margin: 0; }
+.dp-add {
+  align-self: flex-start;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  padding: 4px 10px;
+  border-radius: 6px;
+  border: 1px dashed var(--coral);
+  background: transparent;
+  color: var(--coral);
+}
+.dp-add:hover { background: var(--coral-soft); }
+.dp-check { display: flex; align-items: center; gap: 7px; font-size: 13px; color: var(--ink); cursor: pointer; }
+.dp-stat { display: flex; justify-content: space-between; font-size: 12px; color: var(--slate); }
+.dp-stat b { color: var(--ink); font-weight: 600; }
