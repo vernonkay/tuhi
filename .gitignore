@@ -12,6 +12,9 @@ dist/
 # Tauri build output
 /app/src-tauri/gen/
 
+# WebdriverIO (e2e) run logs
+/app/e2e/logs/
+
 # OS / editor
 .DS_Store
 Thumbs.db

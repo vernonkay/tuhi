@@ -25,6 +25,14 @@ test:
     cd app/src-tauri && cargo test
     cd app && npm test --if-present
 
+# End-to-end tests: build the app (debug) then drive the REAL binary via WebDriver.
+# Requires `tauri-driver` on PATH (cargo install tauri-driver --locked) and, on Linux, a
+# display (wrap in `xvfb-run` when headless). CI runs this on Linux and Windows.
+e2e:
+    cd app && npm run build
+    cd app/src-tauri && cargo build
+    cd app && npm run e2e
+
 # Run ALL checks (the real gate; CI runs this exact target)
 check:
     bash scripts/check/run-checks.sh
