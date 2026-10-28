@@ -17,15 +17,33 @@ export interface MockFilterRow {
   truncated: boolean;
 }
 
+export interface MockTableSniff {
+  tabular: boolean;
+  delimiter: string;
+  columns: number;
+  has_header: boolean;
+  row_count: number;
+}
+
 interface Scenario {
   tabs: Array<{ id: number; name: string; path: string | null; dirty: boolean; readonly: boolean; active: boolean }>;
   active: number | null;
   meta: MockMeta | null;
   filterRows: MockFilterRow[];
   fileLen: number;
+  tableSniff: MockTableSniff | null;
+  tableRows: string[][];
 }
 
-const EMPTY: Scenario = { tabs: [], active: null, meta: null, filterRows: [], fileLen: 0 };
+const EMPTY: Scenario = {
+  tabs: [],
+  active: null,
+  meta: null,
+  filterRows: [],
+  fileLen: 0,
+  tableSniff: null,
+  tableRows: [],
+};
 let scenario: Scenario = { ...EMPTY };
 
 /** Replace (partially) the current scenario. Call before rendering <App />. */
@@ -61,8 +79,24 @@ function tabsState() {
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-export async function invokeMock(cmd: string, _args?: unknown): Promise<any> {
+export async function invokeMock(cmd: string, args?: unknown): Promise<any> {
   switch (cmd) {
+    case "table_sniff":
+      return (
+        scenario.tableSniff ?? {
+          tabular: false,
+          delimiter: "",
+          columns: 0,
+          has_header: false,
+          row_count: 0,
+        }
+      );
+    case "table_window": {
+      const a = args as { start?: number; count?: number } | undefined;
+      const start = a?.start ?? 0;
+      const count = a?.count ?? scenario.tableRows.length;
+      return scenario.tableRows.slice(start, start + count);
+    }
     case "list_tabs":
     case "switch_tab":
     case "open_document":

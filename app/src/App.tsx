@@ -4,6 +4,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { ask, open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { readText, writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { useVirtualizer } from "@tanstack/react-virtual";
+import TableGrid from "./TableGrid";
 import hljs from "highlight.js/lib/common";
 import mermaid from "mermaid";
 import katex from "katex";
@@ -154,6 +155,15 @@ type PaletteItem = { label: string; hint?: string; kind: "command" | "tab" | "fi
 /** The command bar's active mode (#47): Find, Filter, Commands, Go-to-line and Replace are
  *  one top-centre input with a mode chip and one keyboard model; `null` means it's closed. */
 type CmdMode = "command" | "find" | "replace" | "filter" | "goto";
+
+/** The shape of a delimited file, from the `table_sniff` command, driving the tabular view (#1). */
+type TableSniff = {
+  tabular: boolean;
+  delimiter: string;
+  columns: number;
+  has_header: boolean;
+  row_count: number;
+};
 
 /** The directory part of a path (handles both `/` and `\`). */
 function dirOf(p: string): string {
@@ -537,6 +547,10 @@ function App() {
   // side panel for managing highlight rules and reading stats. Auto-on for the large-file
   // engine and for data/log extensions; the rail "Data" dot toggles it by hand.
   const [dataMode, setDataMode] = useState(false);
+  // Tabular view (#1): render a delimited file as a grid instead of the text editor. `tableInfo`
+  // holds the sniffed shape (delimiter, columns, header); `tableView` is the live on/off switch.
+  const [tableView, setTableView] = useState(false);
+  const [tableInfo, setTableInfo] = useState<TableSniff | null>(null);
   const [hlEditorOpen, setHlEditorOpen] = useState(false);
   const [hlFromSettings, setHlFromSettings] = useState(false); // did the rules editor open from Settings?
   const [highlighters, setHighlighters] = useState<{ pattern: string; color: string }[]>(() => {
@@ -824,6 +838,8 @@ function App() {
   // the lens only shows on the plain editor (never over the Markdown preview).
   const isDataFile =
     readonly || (!!meta?.path && /\.(log|ndjson|jsonl|csv|tsv|tab|out|err)$/i.test(meta.path));
+  // Delimited files prefer the grid (#1): .csv/.tsv/.tab auto-open as a table (confirmed by sniff).
+  const isTableFile = !!meta?.path && /\.(csv|tsv|tab)$/i.test(meta.path);
   const lensActive = dataMode && !showLive && !!meta;
   // The lens collapses the editor to matches while its filter box has a query.
   const lensFiltering = lensActive && filterQuery.trim().length > 0;
@@ -1996,6 +2012,32 @@ function App() {
   // log/data extensions, off otherwise. Keyed on the path + engine only (not char_count), so a
   // hand toggle survives editing and only a tab switch / reopen recomputes it.
   useEffect(() => {
+    // Reset the per-file views, then pick the default for this file: a delimited file opens as a
+    // grid (confirmed by sniffing — csv/tsv that isn't really tabular falls back to data mode),
+    // the large-file engine and logs open in data mode, everything else plain.
+    setTableView(false);
+    setTableInfo(null);
+    if (isTableFile) {
+      setDataMode(false);
+      let cancelled = false;
+      void (async () => {
+        try {
+          const s = await invoke<TableSniff>("table_sniff");
+          if (cancelled) return;
+          if (s.tabular) {
+            setTableInfo(s);
+            setTableView(true);
+          } else {
+            setDataMode(isDataFile);
+          }
+        } catch {
+          if (!cancelled) setDataMode(isDataFile);
+        }
+      })();
+      return () => {
+        cancelled = true;
+      };
+    }
     setDataMode(isDataFile);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [meta?.path, readonly]);
@@ -2816,6 +2858,32 @@ function App() {
       ...(meta && !readonly && docIsJson ? [{ label: "Format JSON (pretty-print)", kind: C, run: () => void formatJson() }] : []),
       ...(meta ? [{ label: "Filter lines to view…", kind: C, run: () => openFilter() }] : []),
       ...(meta ? [{ label: dataMode ? "Exit data mode" : "Data mode (filter · tail · highlight)", kind: C, run: () => setDataMode((v) => !v) }] : []),
+      ...(meta
+        ? [
+            {
+              label: tableView ? "View as text" : "View as table",
+              kind: C,
+              run: () => {
+                if (tableView) {
+                  setTableView(false);
+                  return;
+                }
+                void (async () => {
+                  try {
+                    const s = await invoke<TableSniff>("table_sniff");
+                    if (s.tabular) {
+                      setTableInfo(s);
+                      setTableView(true);
+                      setDataMode(false);
+                    }
+                  } catch {
+                    /* not tabular / nothing open — leave the text view */
+                  }
+                })();
+              },
+            },
+          ]
+        : []),
       ...(meta?.path ? [{ label: followOn ? "Stop following file" : "Follow file (tail)", kind: C, run: () => toggleFollow() }] : []),
       { label: "Edit highlighters…", kind: C, run: () => { setHlFromSettings(false); setHlEditorOpen(true); } },
       { label: "Settings…", kind: C, run: () => setSettingsOpen(true) },
@@ -3455,7 +3523,14 @@ function App() {
         </div>
       )}
       {lensActive && lensBar}
-      {showLive ? (
+      {tableView && tableInfo ? (
+      <TableGrid
+        delimiter={tableInfo.delimiter}
+        hasHeader={tableInfo.has_header}
+        columns={tableInfo.columns}
+        rowCount={tableInfo.row_count}
+      />
+      ) : showLive ? (
       <div className={`mdview${editBlock != null ? " editing" : ""}`} ref={mdScrollRef} tabIndex={0}>
         {blocks.length > 0 && (
           <div

@@ -1349,3 +1349,57 @@ button,
 .dp-check { display: flex; align-items: center; gap: 7px; font-size: 13px; color: var(--ink); cursor: pointer; }
 .dp-stat { display: flex; justify-content: space-between; font-size: 12px; color: var(--slate); }
 .dp-stat b { color: var(--ink); font-weight: 600; }
+
+/* Tabular view (feature #1): a virtualized grid for delimited files. Rows are absolutely
+   positioned by the row virtualizer; the header row and the row-number column are sticky, so
+   both stay put while a multi-GB CSV scrolls in either axis. */
+.table-grid {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  outline: none;
+  background: var(--paper);
+  color: var(--ink);
+  font: 13px/1.5 var(--mono-font);
+}
+.tg-content { position: relative; }
+.tg-head {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  display: flex;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+  font-weight: 600;
+}
+.tg-list { position: relative; }
+.tg-row {
+  position: absolute;
+  top: 0;
+  left: 0;
+  display: flex;
+  border-bottom: 1px solid var(--border);
+}
+.tg-hcell,
+.tg-cell,
+.tg-num {
+  box-sizing: border-box;
+  padding: 0 10px;
+  line-height: 26px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  border-right: 1px solid var(--border);
+}
+.tg-num {
+  position: sticky;
+  left: 0;
+  z-index: 2;
+  background: var(--panel);
+  color: var(--slate);
+  text-align: right;
+  font-size: 12px;
+}
+.tg-head .tg-num { z-index: 4; } /* the top-left corner sits above both sticky axes */
+.tg-row:hover .tg-cell,
+.tg-row:hover .tg-num { background: var(--coral-soft); }
