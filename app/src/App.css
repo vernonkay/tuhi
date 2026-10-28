@@ -565,6 +565,62 @@ html, body, #root {
 .find-toggle:hover { border-color: var(--coral); }
 .find-toggle.on { background: var(--coral); color: #fff; border-color: var(--coral); }
 
+/* Command bar (#47): one top-centre input for Find · Replace · Filter · Go to line · Commands.
+   Reuses .palette-* for the command dropdown and .find-btn/.find-toggle for the mode controls. */
+.cmdbar-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.35);
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  padding-top: 12vh;
+  z-index: 50;
+}
+.cmdbar {
+  width: min(620px, 92vw);
+  max-height: 70vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 24px 70px -20px rgba(0, 0, 0, 0.6);
+  overflow: hidden;
+}
+.cmd-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+}
+.cmd-row + .cmd-row { border-top: 1px solid var(--border); }
+.cmd-chip {
+  flex: 0 0 auto;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #fff;
+  background: var(--coral);
+  border-radius: 6px;
+  padding: 4px 8px;
+}
+.cmd-chip.ghost { color: var(--slate); background: var(--coral-soft); }
+.cmd-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  font: inherit;
+  font-size: 15px;
+  padding: 4px 2px;
+  border: none;
+  background: transparent;
+  color: var(--ink);
+}
+.cmd-input:focus { outline: none; }
+.cmd-count { flex: 0 0 auto; font-size: 12px; color: var(--slate); font-variant-numeric: tabular-nums; }
+.cmd-list { overflow: auto; padding: 6px; border-top: 1px solid var(--border); }
+
 /* Search-match highlight (behind text; the active match shows as the selection). */
 .find-match {
   position: absolute;

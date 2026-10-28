@@ -151,6 +151,10 @@ function buildOutlineTree(items: OutlineItem[]): OutlineNode[] {
 /** A command-palette entry: a label, an optional hint, its group, and its action. */
 type PaletteItem = { label: string; hint?: string; kind: "command" | "tab" | "file"; run: () => void };
 
+/** The command bar's active mode (#47): Find, Filter, Commands, Go-to-line and Replace are
+ *  one top-centre input with a mode chip and one keyboard model; `null` means it's closed. */
+type CmdMode = "command" | "find" | "replace" | "filter" | "goto";
+
 /** The directory part of a path (handles both `/` and `\`). */
 function dirOf(p: string): string {
   const i = Math.max(p.lastIndexOf("/"), p.lastIndexOf("\\"));
@@ -524,7 +528,6 @@ function App() {
   // A Done/Cancel tap on the block editor commits on pointerdown, which re-renders the
   // block; the click that follows must not be read as "open the block now under the finger".
   const swallowClickRef = useRef(false);
-  const [filterOpen, setFilterOpen] = useState(false);
   const [filterQuery, setFilterQuery] = useState("");
   const [filterMatches, setFilterMatches] = useState<FilterMatch[]>([]);
   const [filterCase, setFilterCase] = useState(false); // case-sensitive filter (data mode)
@@ -548,7 +551,6 @@ function App() {
       { pattern: "warn", color: "#ffb81d" },
     ];
   });
-  const [paletteOpen, setPaletteOpen] = useState(false);
   const [paletteQuery, setPaletteQuery] = useState("");
   const [paletteIndex, setPaletteIndex] = useState(0);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -747,8 +749,6 @@ function App() {
   const [busy, setBusy] = useState(false);
 
   // Find / replace
-  const [findOpen, setFindOpen] = useState(false);
-  const [showReplace, setShowReplace] = useState(false);
   const [findQuery, setFindQuery] = useState("");
   const [replaceText, setReplaceText] = useState("");
   const [useRegex, setUseRegex] = useState(false);
@@ -759,13 +759,20 @@ function App() {
   const [searchTrunc, setSearchTrunc] = useState(false);
   const [activeMatch, setActiveMatch] = useState(0);
   // Go-to-line prompt.
-  const [gotoOpen, setGotoOpen] = useState(false);
   const [gotoValue, setGotoValue] = useState("");
+
+  // The command bar (#47): one top-centre input for Find, Filter, Commands, Go-to-line and
+  // Replace. `cmdMode` is the single source of truth; the old per-surface booleans are derived
+  // from it so every existing effect and result surface (in-doc find highlights, the filter
+  // collapse, the command dropdown) keeps working while only the input chrome is unified.
+  const [cmdMode, setCmdMode] = useState<CmdMode | null>(null);
+  const findOpen = cmdMode === "find" || cmdMode === "replace";
+  const filterOpen = cmdMode === "filter";
+  const paletteOpen = cmdMode === "command";
 
   const scrollerRef = useRef<HTMLDivElement>(null);
   const measureRef = useRef<HTMLSpanElement>(null);
-  const findInputRef = useRef<HTMLInputElement>(null);
-  const gotoInputRef = useRef<HTMLInputElement>(null);
+  const cmdInputRef = useRef<HTMLInputElement>(null);
   const charWidthRef = useRef(7.8);
   const [, bumpCw] = useState(0); // forces a re-render after the glyph width is re-measured
   const caretMeasureRef = useRef<HTMLSpanElement>(null);
@@ -820,6 +827,8 @@ function App() {
   const lensActive = dataMode && !showLive && !!meta;
   // The lens collapses the editor to matches while its filter box has a query.
   const lensFiltering = lensActive && filterQuery.trim().length > 0;
+  // The command bar's Filter mode collapses the editor the same way (outside data mode).
+  const filterCollapse = filterOpen && !lensActive && filterQuery.trim().length > 0;
 
   // Virtualize the preview: only the blocks on screen become DOM nodes, so the preview
   // scales to any block count (the char cap bounds parse/transfer cost, not render). Rows
@@ -1006,7 +1015,7 @@ function App() {
   }, []);
 
   const closeGoto = useCallback(() => {
-    setGotoOpen(false);
+    setCmdMode(null);
     scrollerRef.current?.focus();
   }, []);
 
@@ -1041,7 +1050,7 @@ function App() {
       setTabs(ts.tabs);
       setActiveTabId(ts.active);
       setAnchor(null);
-      setFindOpen(false);
+      setCmdMode(null);
       setMeta(ts.meta);
       if (ts.meta) {
         if (scrollerRef.current) scrollerRef.current.scrollTop = 0;
@@ -1536,7 +1545,7 @@ function App() {
   const openPalette = useCallback(() => {
     setPaletteQuery("");
     setPaletteIndex(0);
-    setPaletteOpen(true);
+    setCmdMode("command");
   }, []);
 
   // Undo / redo. The Rust buffer owns the history and rehighlights itself; here we
@@ -1631,14 +1640,8 @@ function App() {
     if (!meta) return;
     setFilterQuery("");
     setFilterMatches([]);
-    setFilterOpen(true);
+    setCmdMode("filter");
   }, [meta]);
-
-  const closeFilter = useCallback(() => {
-    setFilterOpen(false);
-    setFilterMatches([]);
-    scrollerRef.current?.focus();
-  }, []);
 
   // Highlighters: persist the rules, compile them once, expose a per-line matcher.
   useEffect(() => {
@@ -1935,34 +1938,33 @@ function App() {
       if (!meta) return;
       // Replace needs an editable buffer; find alone works on the large-file engine.
       if (replace && readonly) return;
-      setFindOpen(true);
-      setShowReplace(replace && !readonly);
-      setTimeout(() => findInputRef.current?.focus(), 0);
+      setCmdMode(replace && !readonly ? "replace" : "find");
     },
     [meta, readonly],
   );
 
-  const closeFind = useCallback(() => {
-    setFindOpen(false);
+  // Close the command bar from any mode (its ✕, a backdrop click, or Esc): clears every
+  // mode's result state so nothing lingers, then returns focus to the editor.
+  const closeCmd = useCallback(() => {
+    setCmdMode(null);
     setMatches([]);
     setRoHits([]);
     setSearchTrunc(false);
+    setFilterMatches([]);
     scrollerRef.current?.focus();
   }, []);
+
+  // One input serves every mode, so focus it whenever the bar opens or the mode changes.
+  useEffect(() => {
+    if (cmdMode) setTimeout(() => cmdInputRef.current?.focus(), 0);
+  }, [cmdMode]);
 
   // Esc closes whatever chrome is open, topmost first: a modal, then find/filter, then a
   // gutter panel. (A second click on the same dot toggles it closed too.) Find and the
   // palette also handle Esc on their own focused inputs; this covers everything else.
   useEffect(() => {
     const anyOpen =
-      newFileOpen ||
-      settingsOpen ||
-      hlEditorOpen ||
-      paletteOpen ||
-      filterOpen ||
-      findOpen ||
-      gotoOpen ||
-      leftPanel !== null;
+      newFileOpen || settingsOpen || hlEditorOpen || cmdMode !== null || leftPanel !== null;
     if (!anyOpen) return;
     const onEsc = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
@@ -1970,15 +1972,12 @@ function App() {
       if (newFileOpen) setNewFileOpen(false);
       else if (settingsOpen) setSettingsOpen(false);
       else if (hlEditorOpen) closeHlEditor();
-      else if (paletteOpen) setPaletteOpen(false);
-      else if (filterOpen) closeFilter();
-      else if (gotoOpen) closeGoto();
-      else if (findOpen) closeFind();
+      else if (cmdMode) closeCmd();
       else if (leftPanel) setLeftPanel(null);
     };
     window.addEventListener("keydown", onEsc);
     return () => window.removeEventListener("keydown", onEsc);
-  }, [newFileOpen, settingsOpen, hlEditorOpen, paletteOpen, filterOpen, findOpen, gotoOpen, leftPanel, closeHlEditor, closeFilter, closeFind, closeGoto]);
+  }, [newFileOpen, settingsOpen, hlEditorOpen, cmdMode, leftPanel, closeHlEditor, closeCmd]);
 
   // Re-run the search as the query or options change while the bar is open.
   useEffect(() => {
@@ -2088,8 +2087,7 @@ function App() {
           if (meta) {
             e.preventDefault();
             setGotoValue("");
-            setGotoOpen(true);
-            setTimeout(() => gotoInputRef.current?.focus(), 0);
+            setCmdMode("goto");
           }
           break;
         case "h":
@@ -2112,9 +2110,7 @@ function App() {
           break;
         case "p":
           e.preventDefault();
-          setPaletteQuery("");
-          setPaletteIndex(0);
-          setPaletteOpen(true);
+          openPalette();
           break;
         default:
           break;
@@ -2122,7 +2118,7 @@ function App() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [handleNew, handleOpen, handleSave, closeActiveTab, openFind, undoRedo, meta, readonly]);
+  }, [handleNew, handleOpen, handleSave, closeActiveTab, openFind, openPalette, undoRedo, meta, readonly]);
 
   // --- Movement (extend = hold Shift to grow the selection) ---
 
@@ -2815,7 +2811,7 @@ function App() {
       ...(folderRoot && parentDir(folderRoot) ? [{ label: "Up to parent folder", kind: C, run: () => void goUp() }] : []),
       ...(meta ? [{ label: "Save", hint: combo("S"), kind: C, run: () => void handleSave() }] : []),
       ...(meta ? [{ label: "Find in file…", hint: combo("F"), kind: C, run: () => openFind(false) }] : []),
-      ...(meta ? [{ label: "Go to line…", hint: combo("G"), kind: C, run: () => { setGotoValue(""); setGotoOpen(true); setTimeout(() => gotoInputRef.current?.focus(), 0); } }] : []),
+      ...(meta ? [{ label: "Go to line…", hint: combo("G"), kind: C, run: () => { setGotoValue(""); setCmdMode("goto"); } }] : []),
       ...(meta && mdPreviewable ? [{ label: showLive ? "Edit Markdown source" : "Preview Markdown", kind: C, run: () => setEditSource((v) => !v) }] : []),
       ...(meta && !readonly && docIsJson ? [{ label: "Format JSON (pretty-print)", kind: C, run: () => void formatJson() }] : []),
       ...(meta ? [{ label: "Filter lines to view…", kind: C, run: () => openFilter() }] : []),
@@ -2840,7 +2836,7 @@ function App() {
   const onPaletteKey = (e: React.KeyboardEvent) => {
     if (e.key === "Escape") {
       e.preventDefault();
-      setPaletteOpen(false);
+      closeCmd();
     } else if (e.key === "ArrowDown") {
       e.preventDefault();
       setPaletteIndex((i) => Math.min(i + 1, paletteFiltered.length - 1));
@@ -2851,14 +2847,78 @@ function App() {
       e.preventDefault();
       const it = paletteFiltered[paletteIndex];
       if (it) {
+        // Close first, then run: a command that opens another mode (Find, Filter, Go to line)
+        // sets `cmdMode` after this clear, so its mode wins instead of being closed under it.
+        setCmdMode(null);
         it.run();
-        setPaletteOpen(false);
       }
     }
   };
 
-  // The collapse-to-matches list, shared by the classic filter overlay and the data-mode lens.
-  // `onPick` decides what a row click does (close the overlay, or clear the lens, then jump).
+  // --- Command bar plumbing (#47): one input, mode-driven value / change / key. ---
+  const CMD_CHIP: Record<CmdMode, string> = {
+    command: "Run",
+    find: "Find",
+    replace: "Replace",
+    filter: "Filter",
+    goto: "Line",
+  };
+  const CMD_PLACEHOLDER: Record<CmdMode, string> = {
+    command: "Open a file or run a command  (/ find · = filter · : line)",
+    find: "Find in file",
+    replace: "Find",
+    filter: "Filter lines by regex (e.g. ERROR|WARN)…",
+    goto: `Go to line (1–${lineCount.toLocaleString()})`,
+  };
+  const cmdValue =
+    cmdMode === "command"
+      ? paletteQuery
+      : cmdMode === "goto"
+        ? gotoValue
+        : cmdMode === "filter"
+          ? filterQuery
+          : findQuery; // find | replace
+
+  const onCmdInput = (v: string) => {
+    if (cmdMode === "command") {
+      // Leading prefixes jump straight to a mode: `/` find · `=` filter · `:` line (need a file).
+      if (meta && v.startsWith("/")) { setFindQuery(v.slice(1)); setCmdMode("find"); return; }
+      if (meta && v.startsWith("=")) { setFilterQuery(v.slice(1)); setCmdMode("filter"); return; }
+      if (meta && v.startsWith(":")) { setGotoValue(v.slice(1).replace(/[^0-9]/g, "")); setCmdMode("goto"); return; }
+      setPaletteQuery(v);
+      setPaletteIndex(0);
+    } else if (cmdMode === "goto") {
+      setGotoValue(v.replace(/[^0-9]/g, ""));
+    } else if (cmdMode === "filter") {
+      setFilterQuery(v);
+    } else {
+      setFindQuery(v); // find | replace
+    }
+  };
+
+  const onCmdKey = (e: React.KeyboardEvent) => {
+    if (e.key === "Escape") {
+      e.preventDefault();
+      closeCmd();
+      return;
+    }
+    if (cmdMode === "command") {
+      onPaletteKey(e);
+      return;
+    }
+    if (e.key === "Enter") {
+      e.preventDefault();
+      if (cmdMode === "find" || cmdMode === "replace") {
+        void gotoMatch(e.shiftKey ? activeMatch - 1 : activeMatch + 1);
+      } else if (cmdMode === "goto") {
+        submitGoto();
+      }
+      // filter is live — Enter just keeps the collapsed view in place.
+    }
+  };
+
+  // The collapse-to-matches list, shared by the command bar's Filter mode and the data-mode lens.
+  // `onPick` decides what a row click does (close the bar, or clear the lens, then jump).
   const renderFilterList = (onPick: (line: number) => void): React.ReactNode => (
     <div className="filter-list">
       {filterMatches.length ? (
@@ -3035,8 +3095,7 @@ function App() {
           onClick={() => {
             if (leftPanel === "files") setLeftPanel(null);
             else {
-              closeFind();
-              closeFilter();
+              closeCmd();
               setLeftPanel("files");
             }
           }}
@@ -3046,36 +3105,18 @@ function App() {
           <span className="gd-label">Files</span>
         </button>
         <button
-          className={`gut-dot-btn${findOpen ? " on" : ""}`}
+          className={`gut-dot-btn${cmdMode ? " on" : ""}`}
           onClick={() => {
-            if (findOpen) closeFind();
+            if (cmdMode) closeCmd();
             else {
               setLeftPanel(null);
-              closeFilter();
-              openFind(false);
+              openPalette();
             }
           }}
-          disabled={!meta}
-          title={`Find (${combo("F")})`}
+          title={`Search & commands (${combo("P")}) — find, filter, go to line, run anything`}
         >
           <span className="gd" />
-          <span className="gd-label">Find</span>
-        </button>
-        <button
-          className={`gut-dot-btn${filterOpen ? " on" : ""}`}
-          onClick={() => {
-            if (filterOpen) closeFilter();
-            else {
-              setLeftPanel(null);
-              closeFind();
-              openFilter();
-            }
-          }}
-          disabled={!meta}
-          title="Filter lines to view"
-        >
-          <span className="gd" />
-          <span className="gd-label">Filter</span>
+          <span className="gd-label">Search</span>
         </button>
         <button
           className={`gut-dot-btn${dataMode ? " on" : ""}`}
@@ -3085,20 +3126,6 @@ function App() {
         >
           <span className="gd" />
           <span className="gd-label">Data</span>
-        </button>
-        {docIsJson && (
-          <button
-            className="gut-dot-btn"
-            onClick={() => void formatJson()}
-            title="Format JSON (pretty-print)"
-          >
-            <span className="gd" />
-            <span className="gd-label">Format JSON</span>
-          </button>
-        )}
-        <button className="gut-dot-btn" onClick={openPalette} title={`Command palette (${combo("P")})`}>
-          <span className="gd" />
-          <span className="gd-label">Commands</span>
         </button>
         <button className="gut-dot-btn" onClick={() => setSettingsOpen(true)} title="Settings">
           <span className="gd" />
@@ -3288,77 +3315,110 @@ function App() {
 
       {error && <div className="error">{error}</div>}
 
-      {gotoOpen && (
-        <div className="findbar">
-          <div className="find-row">
-            <input
-              ref={gotoInputRef}
-              className="find-input"
-              placeholder={`Go to line (1–${lineCount.toLocaleString()})`}
-              value={gotoValue}
-              inputMode="numeric"
-              onChange={(e) => setGotoValue(e.target.value.replace(/[^0-9]/g, ""))}
-              onKeyDown={(e) => {
-                if (e.key === "Escape") {
-                  e.preventDefault();
-                  closeGoto();
-                } else if (e.key === "Enter") {
-                  e.preventDefault();
-                  submitGoto();
-                }
-              }}
-            />
-            <button className="find-btn" onClick={submitGoto} title="Go (Enter)">↵</button>
-            <button className="find-btn" onClick={closeGoto} title="Close (Esc)">✕</button>
-          </div>
-        </div>
-      )}
-
-      {findOpen && (
-        <div className="findbar">
-          <div className="find-row">
-            <input
-              ref={findInputRef}
-              className="find-input"
-              placeholder="Find"
-              value={findQuery}
-              onChange={(e) => setFindQuery(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Escape") {
-                  e.preventDefault();
-                  closeFind();
-                } else if (e.key === "Enter") {
-                  e.preventDefault();
-                  void gotoMatch(e.shiftKey ? activeMatch - 1 : activeMatch + 1);
-                }
-              }}
-            />
-            <span className="find-count">
-              {(() => {
-                const n = readonly ? roHits.length : matches.length;
-                return n ? `${activeMatch + 1} / ${n}${readonly && searchTrunc ? "+" : ""}` : "0 results";
-              })()}
-            </span>
-            <button className="find-btn" onClick={() => void gotoMatch(activeMatch - 1)} title="Previous (Shift+Enter)">↑</button>
-            <button className="find-btn" onClick={() => void gotoMatch(activeMatch + 1)} title="Next (Enter)">↓</button>
-            <button className={`find-toggle${caseSensitive ? " on" : ""}`} onClick={() => setCaseSensitive((v) => !v)} title="Match case">Aa</button>
-            <button className={`find-toggle${useRegex ? " on" : ""}`} onClick={() => setUseRegex((v) => !v)} title="Regular expression">.*</button>
-            {!readonly && (
-              <button className={`find-toggle${showReplace ? " on" : ""}`} onClick={() => setShowReplace((v) => !v)} title="Toggle replace">⇄</button>
-            )}
-            <button className="find-btn" onClick={closeFind} title="Close (Esc)">✕</button>
-          </div>
-          {showReplace && (
-            <div className="find-row">
+      {cmdMode && (
+        <div className="cmdbar-overlay" onMouseDown={() => closeCmd()}>
+          <div className={`cmdbar mode-${cmdMode}`} onMouseDown={(e) => e.stopPropagation()}>
+            <div className="cmd-row">
+              <span className="cmd-chip">{CMD_CHIP[cmdMode]}</span>
               <input
-                className="find-input"
-                placeholder="Replace"
-                value={replaceText}
-                onChange={(e) => setReplaceText(e.target.value)}
+                ref={cmdInputRef}
+                className="cmd-input"
+                placeholder={CMD_PLACEHOLDER[cmdMode]}
+                value={cmdValue}
+                inputMode={cmdMode === "goto" ? "numeric" : undefined}
+                onChange={(e) => onCmdInput(e.target.value)}
+                onKeyDown={onCmdKey}
               />
-              <button className="find-btn wide" onClick={() => void doReplaceAll()}>Replace all</button>
+              {(cmdMode === "find" || cmdMode === "replace") && (
+                <>
+                  <span className="cmd-count">
+                    {(() => {
+                      const n = readonly ? roHits.length : matches.length;
+                      return n ? `${activeMatch + 1} / ${n}${readonly && searchTrunc ? "+" : ""}` : "0 results";
+                    })()}
+                  </span>
+                  <button className="find-btn" onClick={() => void gotoMatch(activeMatch - 1)} title="Previous (Shift+Enter)">↑</button>
+                  <button className="find-btn" onClick={() => void gotoMatch(activeMatch + 1)} title="Next (Enter)">↓</button>
+                  <button className={`find-toggle${caseSensitive ? " on" : ""}`} onClick={() => setCaseSensitive((v) => !v)} title="Match case">Aa</button>
+                  <button className={`find-toggle${useRegex ? " on" : ""}`} onClick={() => setUseRegex((v) => !v)} title="Regular expression">.*</button>
+                  {!readonly && (
+                    <button
+                      className={`find-toggle${cmdMode === "replace" ? " on" : ""}`}
+                      onClick={() => setCmdMode((m) => (m === "replace" ? "find" : "replace"))}
+                      title="Toggle replace"
+                    >
+                      ⇄
+                    </button>
+                  )}
+                </>
+              )}
+              {cmdMode === "filter" && (
+                <>
+                  <span className="cmd-count">
+                    {filterMatches.length >= 1000
+                      ? "1000+ (first 1000)"
+                      : `${filterMatches.length} line${filterMatches.length === 1 ? "" : "s"}`}
+                  </span>
+                  <button className={`find-toggle${filterCase ? " on" : ""}`} onClick={() => setFilterCase((v) => !v)} title="Match case">Aa</button>
+                </>
+              )}
+              {cmdMode === "goto" && (
+                <button className="find-btn" onClick={submitGoto} title="Go (Enter)">↵</button>
+              )}
+              <button className="find-btn" onClick={closeCmd} title="Close (Esc)">✕</button>
             </div>
-          )}
+            {cmdMode === "replace" && (
+              <div className="cmd-row">
+                <span className="cmd-chip ghost">With</span>
+                <input
+                  className="cmd-input"
+                  placeholder="Replace"
+                  value={replaceText}
+                  onChange={(e) => setReplaceText(e.target.value)}
+                />
+                <button className="find-btn wide" onClick={() => void doReplaceAll()}>Replace all</button>
+              </div>
+            )}
+            {cmdMode === "command" && (
+              <>
+                <div className="cmd-list">
+                  {paletteFiltered.length ? (
+                    paletteFiltered.map((it, i) => {
+                      const prev = paletteFiltered[i - 1];
+                      const header =
+                        !prev || prev.kind !== it.kind
+                          ? it.kind === "command"
+                            ? "Commands"
+                            : it.kind === "tab"
+                              ? "Open tabs"
+                              : "Files in this folder"
+                          : null;
+                      return (
+                        <div key={`${it.kind}-${it.label}-${i}`}>
+                          {header && <div className="palette-section">{header}</div>}
+                          <div
+                            className={`palette-item${i === paletteIndex ? " on" : ""}`}
+                            onMouseEnter={() => setPaletteIndex(i)}
+                            onMouseDown={(e) => {
+                              e.preventDefault();
+                              setCmdMode(null);
+                              it.run();
+                            }}
+                          >
+                            <span className="pl-label">{it.label}</span>
+                            {it.hint && <span className="pl-hint">{it.hint}</span>}
+                          </div>
+                        </div>
+                      );
+                    })
+                  ) : (
+                    <div className="palette-empty">No files or commands match</div>
+                  )}
+                </div>
+                <div className="palette-foot">↑↓ move · Enter run · Esc close · / find · = filter · : line</div>
+              </>
+            )}
+          </div>
         </div>
       )}
 
@@ -3479,12 +3539,18 @@ function App() {
             </div>
           ))}
       </div>
-      ) : lensFiltering ? (
+      ) : lensFiltering || filterCollapse ? (
       <div className="filter-view lens-list">
         {renderFilterList((line) => {
-          // Clearing the query remounts the scroller; jump once it's back so the viewport scrolls.
-          setFilterQuery("");
-          setTimeout(() => void jumpToLine(line), 0);
+          if (filterCollapse) {
+            // Command-bar Filter: close the bar, then jump to the picked line in the editor.
+            closeCmd();
+            void jumpToLine(line);
+          } else {
+            // Lens: clearing the query remounts the scroller; jump once it's back so it scrolls.
+            setFilterQuery("");
+            setTimeout(() => void jumpToLine(line), 0);
+          }
         })}
       </div>
       ) : (
@@ -3564,37 +3630,6 @@ function App() {
       </div>
       )}
       {lensActive && meta?.path && liveBadge}
-      {filterOpen && (
-        <div className="filter-view">
-          <div className="filter-bar">
-            <input
-              className="filter-input"
-              autoFocus
-              placeholder="Filter lines by regex (e.g. ERROR|WARN)…"
-              value={filterQuery}
-              onChange={(e) => setFilterQuery(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Escape") {
-                  e.preventDefault();
-                  closeFilter();
-                }
-              }}
-            />
-            <span className="filter-count">
-              {filterMatches.length >= 1000
-                ? "1000+ (first 1000)"
-                : `${filterMatches.length} line${filterMatches.length === 1 ? "" : "s"}`}
-            </span>
-            <button className="find-btn" onClick={closeFilter} title="Close (Esc)">
-              ✕
-            </button>
-          </div>
-          {renderFilterList((line) => {
-            closeFilter();
-            void jumpToLine(line);
-          })}
-        </div>
-      )}
       </div>
 
       <footer className="statusbar">
@@ -3658,8 +3693,7 @@ function App() {
           onClick={() => {
             if (leftPanel === "outline") setLeftPanel(null);
             else {
-              closeFind();
-              closeFilter();
+              closeCmd();
               setLeftPanel("outline");
             }
           }}
@@ -3672,58 +3706,6 @@ function App() {
         <div className="gut-sp" />
         <div className="gut-tag">OUTLINE</div>
       </aside>
-      {paletteOpen && (
-        <div className="palette-overlay" onMouseDown={() => setPaletteOpen(false)}>
-          <div className="palette-modal" onMouseDown={(e) => e.stopPropagation()}>
-            <input
-              className="palette-input"
-              autoFocus
-              placeholder="Search a file to open, or run a command (try 'Open Folder' or 'Save')"
-              value={paletteQuery}
-              onChange={(e) => {
-                setPaletteQuery(e.target.value);
-                setPaletteIndex(0);
-              }}
-              onKeyDown={onPaletteKey}
-            />
-            <div className="palette-list">
-              {paletteFiltered.length ? (
-                paletteFiltered.map((it, i) => {
-                  const prev = paletteFiltered[i - 1];
-                  const header =
-                    !prev || prev.kind !== it.kind
-                      ? it.kind === "command"
-                        ? "Commands"
-                        : it.kind === "tab"
-                          ? "Open tabs"
-                          : "Files in this folder"
-                      : null;
-                  return (
-                    <div key={`${it.kind}-${it.label}-${i}`}>
-                      {header && <div className="palette-section">{header}</div>}
-                      <div
-                        className={`palette-item${i === paletteIndex ? " on" : ""}`}
-                        onMouseEnter={() => setPaletteIndex(i)}
-                        onMouseDown={(e) => {
-                          e.preventDefault();
-                          it.run();
-                          setPaletteOpen(false);
-                        }}
-                      >
-                        <span className="pl-label">{it.label}</span>
-                        {it.hint && <span className="pl-hint">{it.hint}</span>}
-                      </div>
-                    </div>
-                  );
-                })
-              ) : (
-                <div className="palette-empty">No files or commands match</div>
-              )}
-            </div>
-            <div className="palette-foot">↑↓ move · Enter run · Esc close</div>
-          </div>
-        </div>
-      )}
       {hlEditorOpen && (
         <div className="palette-overlay" onMouseDown={() => closeHlEditor()}>
           <div className="palette-modal hl-modal" onMouseDown={(e) => e.stopPropagation()}>
