@@ -1403,3 +1403,30 @@ button,
 .tg-head .tg-num { z-index: 4; } /* the top-left corner sits above both sticky axes */
 .tg-row:hover .tg-cell,
 .tg-row:hover .tg-num { background: var(--coral-soft); }
+/* Header columns are buttons (click to sort): reset the button chrome back to a header cell. */
+.tg-sortable {
+  border: none;
+  border-right: 1px solid var(--border);
+  background: var(--panel);
+  color: inherit;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+  text-align: left;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.tg-sortable:hover { background: var(--coral-soft); }
+.tg-sortable.sorted { color: var(--coral); }
+.tg-hlabel { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tg-arrow { margin-left: auto; font-size: 10px; color: var(--coral); }
+.tg-error {
+  position: sticky;
+  left: 0;
+  padding: 6px 10px;
+  font: 12px/1.4 var(--ui-font);
+  color: var(--coral);
+  background: var(--coral-soft);
+  border-bottom: 1px solid var(--border);
+}

@@ -51,6 +51,25 @@ describe("tabular view", () => {
     expect(screen.queryByTestId("table-grid")).not.toBeInTheDocument();
   });
 
+  it("marks a column with a direction arrow when its header is clicked to sort", async () => {
+    setScenario({
+      tableSniff: { tabular: true, delimiter: ",", columns: 3, has_header: true, row_count: 3 },
+      tableRows: [
+        ["name", "age", "city"],
+        ["Ann", "30", "Wellington"],
+        ["Bo", "25", "Auckland"],
+      ],
+      tableOrder: [1, 0], // Bo (25) before Ann (30) when sorted by age ascending
+    });
+    const user = userEvent.setup();
+    openFileScenario(CSV, { readonly: false, line_count: 3, char_count: 60 });
+    render(<App />);
+    await screen.findByTestId("table-grid");
+    // Clicking the "age" header sorts by it; an ascending arrow marks the sorted column.
+    await user.click(await screen.findByRole("button", { name: /age/ }));
+    expect(await screen.findByText("▲")).toBeInTheDocument();
+  });
+
   it("toggles back to the text view with the View as text command", async () => {
     setScenario({
       tableSniff: { tabular: true, delimiter: ",", columns: 2, has_header: true, row_count: 2 },

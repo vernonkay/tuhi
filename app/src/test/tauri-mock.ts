@@ -33,6 +33,8 @@ interface Scenario {
   fileLen: number;
   tableSniff: MockTableSniff | null;
   tableRows: string[][];
+  /** The order `table_sort` returns (data-row indices in display order); null = identity. */
+  tableOrder: number[] | null;
 }
 
 const EMPTY: Scenario = {
@@ -43,6 +45,7 @@ const EMPTY: Scenario = {
   fileLen: 0,
   tableSniff: null,
   tableRows: [],
+  tableOrder: null,
 };
 let scenario: Scenario = { ...EMPTY };
 
@@ -96,6 +99,12 @@ export async function invokeMock(cmd: string, args?: unknown): Promise<any> {
       const start = a?.start ?? 0;
       const count = a?.count ?? scenario.tableRows.length;
       return scenario.tableRows.slice(start, start + count);
+    }
+    case "table_sort":
+      return scenario.tableOrder ?? [];
+    case "table_rows_at": {
+      const a = args as { lines?: number[] } | undefined;
+      return (a?.lines ?? []).map((ln) => scenario.tableRows[ln] ?? []);
     }
     case "list_tabs":
     case "switch_tab":

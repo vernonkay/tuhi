@@ -52,6 +52,8 @@ pub fn run() {
             editor::filter_lines,
             editor::table_sniff,
             editor::table_window,
+            editor::table_sort,
+            editor::table_rows_at,
             editor::file_len,
             editor::reload,
             editor::get_outline,

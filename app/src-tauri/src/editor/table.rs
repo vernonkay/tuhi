@@ -190,6 +190,54 @@ fn header_likely(rows: &[&String], delim: char, columns: usize) -> bool {
     data_has_number || rows.len() == 1
 }
 
+/// Cap on rows sorted in memory. Beyond this the UI keeps the file in its original order and says
+/// it is too large to sort — this bounds the key Vec and the ordering Vec (8 bytes per row). An
+/// external-merge sort for truly huge files is a later step.
+pub const MAX_SORT_ROWS: usize = 2_000_000;
+
+/// A stable sort order over `keys` (one key per data row, in file order): returns the row indices
+/// in display order. Numeric-aware — when every non-empty key parses as a number the column sorts
+/// numerically, otherwise case-insensitively by text; blank keys sort last (ascending). Stable, so
+/// ties keep their original order, and `descending` reverses the comparison rather than the vec so
+/// ties stay stable there too.
+pub fn sort_order(keys: &[String], descending: bool) -> Vec<usize> {
+    use std::cmp::Ordering;
+    let non_empty = |k: &str| !k.trim().is_empty();
+    let any_value = keys.iter().any(|k| non_empty(k));
+    let numeric = any_value
+        && keys
+            .iter()
+            .filter(|k| non_empty(k))
+            .all(|k| k.trim().parse::<f64>().is_ok());
+
+    let cmp: Box<dyn Fn(usize, usize) -> Ordering> = if numeric {
+        // Parse once per row, not once per comparison. Blanks (None) sort after numbers.
+        let nums: Vec<Option<f64>> = keys.iter().map(|k| k.trim().parse::<f64>().ok()).collect();
+        Box::new(move |a, b| match (nums[a], nums[b]) {
+            (Some(x), Some(y)) => x.partial_cmp(&y).unwrap_or(Ordering::Equal),
+            (Some(_), None) => Ordering::Less,
+            (None, Some(_)) => Ordering::Greater,
+            (None, None) => Ordering::Equal,
+        })
+    } else {
+        // Lower-case once per row, not once per comparison. Blanks sort after text.
+        let low: Vec<String> = keys.iter().map(|k| k.trim().to_lowercase()).collect();
+        Box::new(move |a, b| match (low[a].is_empty(), low[b].is_empty()) {
+            (false, false) => low[a].cmp(&low[b]),
+            (false, true) => Ordering::Less,
+            (true, false) => Ordering::Greater,
+            (true, true) => Ordering::Equal,
+        })
+    };
+
+    let mut idx: Vec<usize> = (0..keys.len()).collect();
+    idx.sort_by(|&a, &b| {
+        let o = cmp(a, b);
+        if descending { o.reverse() } else { o }
+    });
+    idx
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -287,5 +335,44 @@ mod tests {
         let s = sniff(&sample);
         assert_eq!(s.delimiter, Some(','));
         assert!(!s.has_header);
+    }
+
+    fn keys(ss: &[&str]) -> Vec<String> {
+        ss.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn sort_order_numeric_not_lexical() {
+        // "10" must sort after "3", which lexical order would get wrong.
+        assert_eq!(
+            sort_order(&keys(&["3", "1", "2", "10"]), false),
+            vec![1, 2, 0, 3]
+        );
+        assert_eq!(
+            sort_order(&keys(&["3", "1", "2", "10"]), true),
+            vec![3, 0, 2, 1]
+        );
+    }
+
+    #[test]
+    fn sort_order_text_is_case_insensitive() {
+        assert_eq!(
+            sort_order(&keys(&["banana", "Apple", "cherry"]), false),
+            vec![1, 0, 2]
+        );
+    }
+
+    #[test]
+    fn sort_order_is_stable_on_ties() {
+        // 'a' first, then the three 'x' rows keep their original order (0, 1, 3).
+        assert_eq!(
+            sort_order(&keys(&["x", "x", "a", "x"]), false),
+            vec![2, 0, 1, 3]
+        );
+    }
+
+    #[test]
+    fn sort_order_puts_blanks_last_ascending() {
+        assert_eq!(sort_order(&keys(&["b", "", "a"]), false), vec![2, 0, 1]);
     }
 }

@@ -1881,6 +1881,80 @@ pub fn table_window(
         .table_rows(start, count, delim)
 }
 
+/// A stable sort order for the tabular view: the data-row indices (0-based, the header excluded
+/// when `has_header`) in display order for `column`, numeric-aware. The UI maps each visual row to
+/// its source line through this order and fetches those rows with `table_rows_at`. Refuses files
+/// over `table::MAX_SORT_ROWS` rows (the sort is in-memory) with an error the UI surfaces. Reads
+/// the column's cells in batches via the engine viewport, so it works on the large-file engine too.
+#[tauri::command]
+pub fn table_sort(
+    column: usize,
+    delimiter: String,
+    has_header: bool,
+    descending: bool,
+    state: State<EditorState>,
+) -> Result<Vec<usize>, EditorError> {
+    let delim = delimiter
+        .chars()
+        .next()
+        .ok_or_else(|| EditorError::Other("table_sort: empty delimiter".into()))?;
+    let reg = state.0.lock().map_err(|_| EditorError::LockPoisoned)?;
+    let b = reg.active_buffer()?;
+    let total = b.meta().line_count;
+    let offset = usize::from(has_header);
+    let data_rows = total.saturating_sub(offset);
+    if data_rows > table::MAX_SORT_ROWS {
+        return Err(EditorError::Other(format!(
+            "too large to sort ({data_rows} rows; limit {})",
+            table::MAX_SORT_ROWS
+        )));
+    }
+    // Gather the column's cell for each data row, in file order, reading in batches.
+    let mut col_keys: Vec<String> = Vec::with_capacity(data_rows);
+    const BATCH: usize = 4096;
+    let mut start = offset;
+    while start < total {
+        let lines = b.viewport(start, BATCH)?;
+        if lines.is_empty() {
+            break;
+        }
+        for l in &lines {
+            let cells = table::split_cells(&l.text, delim);
+            col_keys.push(cells.get(column).cloned().unwrap_or_default());
+        }
+        start += lines.len();
+    }
+    Ok(table::sort_order(&col_keys, descending))
+}
+
+/// Fetch specific table rows by their source line index, each split into cells on `delimiter`.
+/// Used by the grid while a sort is active, where the visible rows map to scattered lines rather
+/// than a contiguous window.
+#[tauri::command]
+pub fn table_rows_at(
+    lines: Vec<usize>,
+    delimiter: String,
+    state: State<EditorState>,
+) -> Result<Vec<Vec<String>>, EditorError> {
+    let delim = delimiter
+        .chars()
+        .next()
+        .ok_or_else(|| EditorError::Other("table_rows_at: empty delimiter".into()))?;
+    let reg = state.0.lock().map_err(|_| EditorError::LockPoisoned)?;
+    let b = reg.active_buffer()?;
+    let mut out = Vec::with_capacity(lines.len());
+    for &ln in &lines {
+        let text = b
+            .viewport(ln, 1)?
+            .into_iter()
+            .next()
+            .map(|l| l.text)
+            .unwrap_or_default();
+        out.push(table::split_cells(&text, delim));
+    }
+    Ok(out)
+}
+
 /// List one directory's immediate children (the file tree expands lazily per folder).
 #[tauri::command]
 pub fn list_dir(path: String) -> Result<Vec<DirEntry>, EditorError> {
