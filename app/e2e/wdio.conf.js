@@ -2,7 +2,9 @@
 // actual Rust backend, the IPC bridge and the native webview (WebView2 on Windows, WebKitGTK on
 // Linux) — the layers the jsdom component tests (src/*.test.tsx) deliberately mock. The release
 // binary must already exist before running: see the `e2e` job in .github/workflows/ci.yml, or
-// locally run `npm run build && (cd src-tauri && cargo build --release)` then `npm run e2e`.
+// locally run `npm run tauri -- build --debug --no-bundle` then `npm run e2e` (or just `just e2e`).
+// Build via the Tauri CLI, never a bare `cargo build`: the CLI embeds the front-end, whereas a
+// plain cargo build runs in dev mode and expects the Vite dev server, so the webview is blank.
 //
 // Driver: the external, cargo-installed `tauri-driver` (driverProvider "official"), so the tests
 // drive the exact binary we ship rather than a build with an embedded test server. Covers Windows

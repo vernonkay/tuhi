@@ -83,13 +83,15 @@ jobs:
       - name: Install tauri-driver
         run: cargo install tauri-driver --locked
       - run: cd app && npm ci
-      - name: Build front-end + debug binary
+      - name: Build app (debug, embedded assets, no installer bundle)
         shell: bash
-        run: |
-          cd app
-          npm run build
-          cd src-tauri
-          cargo build
+        # Use the Tauri CLI, not a bare `cargo build`: the CLI enables the production asset
+        # protocol so the webview loads the EMBEDDED front-end. A plain `cargo build` binary
+        # runs in dev mode and tries to reach the Vite dev server (localhost:1420), which
+        # isn't running in CI — the window comes up blank and WebDriver sees no app (or, on
+        # Windows, the webview never initialises and session creation fails). --no-bundle
+        # skips the slow installer bundling; --debug keeps the compile cheap (no release LTO).
+        run: cd app && npm run tauri -- build --debug --no-bundle
       - name: E2E — Linux (virtual display)
         if: runner.os == 'Linux'
         env:
