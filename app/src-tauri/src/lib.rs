@@ -50,6 +50,8 @@ pub fn run() {
             editor::set_theme,
             editor::list_dir,
             editor::filter_lines,
+            editor::table_sniff,
+            editor::table_window,
             editor::file_len,
             editor::reload,
             editor::get_outline,

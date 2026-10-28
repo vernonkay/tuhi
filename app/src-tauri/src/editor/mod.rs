@@ -29,6 +29,7 @@ mod markdown;
 mod mmapbuf;
 mod recovery;
 mod search;
+mod table;
 use encoding::Encoding;
 use error::EditorError;
 use highlight::{HIGHLIGHT_MAX_BYTES, Span};
@@ -246,6 +247,22 @@ pub trait Buffer: Send {
             hits: Vec::new(),
             truncated: false,
         })
+    }
+    /// One window of rows for the tabular view (feature #1): the lines `[start, start + count)`,
+    /// each split into cells on `delimiter`. Rides on `viewport`, so the engine's random-row
+    /// access and per-line length caps apply and nothing extra is indexed — a multi-GB CSV
+    /// scrolls as a grid the same way it scrolls as text. The default suits every engine.
+    fn table_rows(
+        &self,
+        start: usize,
+        count: usize,
+        delimiter: char,
+    ) -> Result<Vec<Vec<String>>, EditorError> {
+        let lines = self.viewport(start, count)?;
+        Ok(lines
+            .iter()
+            .map(|l| table::split_cells(&l.text, delimiter))
+            .collect())
     }
 }
 
@@ -1801,6 +1818,67 @@ pub fn filter_lines(
         .map_err(|_| EditorError::LockPoisoned)?
         .active_buffer()?
         .filter(&query, use_regex, case_sensitive)
+}
+
+/// What the active document looks like as a table, for the tabular view (feature #1): the
+/// delimiter, the column count, whether the first row is a header, and the total row count. The
+/// UI calls this on entering the view. It samples the first lines via the viewport, so it stays
+/// cheap on a huge file. `tabular` is false (and the rest zero/empty) when it doesn't parse as a
+/// table, so the UI can fall back to text.
+#[derive(Serialize)]
+pub struct TableSniff {
+    pub tabular: bool,
+    /// The delimiter as a one-character string (",", "\t", ";", "|"); empty when not tabular.
+    pub delimiter: String,
+    pub columns: usize,
+    pub has_header: bool,
+    /// Total lines — the grid's row space; the UI offsets by one when `has_header`.
+    pub row_count: usize,
+}
+
+/// Lines sampled when sniffing the table shape.
+const TABLE_SNIFF_SAMPLE: usize = 50;
+
+#[tauri::command]
+pub fn table_sniff(state: State<EditorState>) -> Result<TableSniff, EditorError> {
+    let reg = state.0.lock().map_err(|_| EditorError::LockPoisoned)?;
+    let b = reg.active_buffer()?;
+    let sample: Vec<String> = b
+        .viewport(0, TABLE_SNIFF_SAMPLE)?
+        .into_iter()
+        .map(|l| l.text)
+        .collect();
+    let s = table::sniff(&sample);
+    let row_count = b.meta().line_count;
+    Ok(TableSniff {
+        tabular: s.delimiter.is_some(),
+        delimiter: s.delimiter.map(|c| c.to_string()).unwrap_or_default(),
+        columns: s.columns,
+        has_header: s.has_header,
+        row_count,
+    })
+}
+
+/// One window of table rows `[start, start + count)`, each line split into cells on `delimiter`
+/// (a one-character string). Backs the virtualized grid: the UI fetches the visible row window as
+/// it scrolls, exactly like the text viewport.
+#[tauri::command]
+pub fn table_window(
+    start: usize,
+    count: usize,
+    delimiter: String,
+    state: State<EditorState>,
+) -> Result<Vec<Vec<String>>, EditorError> {
+    let delim = delimiter
+        .chars()
+        .next()
+        .ok_or_else(|| EditorError::Other("table_window: empty delimiter".into()))?;
+    state
+        .0
+        .lock()
+        .map_err(|_| EditorError::LockPoisoned)?
+        .active_buffer()?
+        .table_rows(start, count, delim)
 }
 
 /// List one directory's immediate children (the file tree expands lazily per folder).
