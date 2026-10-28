@@ -1,6 +1,6 @@
 [package]
 name = "tuhi"
-version = "1.0.1"
+version = "1.1.0"
 description = "A fast, cross-platform, open-source text & Markdown editor"
 authors = ["Vernon Kay"]
 license = "MIT OR Apache-2.0"

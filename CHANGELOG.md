@@ -6,8 +6,28 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-10-29
+
+"tuhi opens anything." This release leans into the large-file engine: open and wrangle data —
+logs, CSVs, huge files — not just Markdown notes.
+
 ### Added
 
+- **Tabular view** for delimited files: open a CSV/TSV/JSON-lines file as a real grid and scroll
+  it, even at multiple GB, as fast as plain text (it rides the same large-file engine, so nothing
+  is loaded into memory to view it). **Sort** by any column (click the header; numeric columns
+  sort numerically, text case-insensitively), **jump to a column** for wide tables, with a sticky
+  header row and sticky row numbers. `.csv`/`.tsv`/`.tab` open as a grid automatically once the
+  shape is confirmed; **View as table** / **View as text** toggles it.
+- **Data mode** for logs and large files: a lens over the editor with a sticky **filter strip**
+  (collapse the view to matching lines), a **LIVE** tail badge that follows a growing file, and
+  gutter colour stripes on highlighted lines — plus a thin **Data** panel for managing highlight
+  rules and a stats block (lines, matches, size, encoding). Auto-engages when you open a log or a
+  file on the large-file engine.
+- **Command bar** (<kbd>Ctrl/Cmd+P</kbd>): Find, Filter, Commands, Go-to-line and Replace are now
+  one top-centre input with a mode chip and a single keyboard model. Typing `/`, `=` or `:` as the
+  first character jumps straight to Find, Filter or Go-to-line. The left rail is reduced to
+  Files · Search · Data · Settings.
 - **New file** (<kbd>Ctrl/Cmd+N</kbd>): asks for a type first (Markdown or plain text), then
   opens a fresh untitled document in its own tab; the first save prompts for a location
   (Save As, defaulting to `.md` for Markdown). Reachable from <kbd>Ctrl/Cmd+N</kbd>, the
