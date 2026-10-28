@@ -184,11 +184,41 @@ export default function TableGrid({ delimiter, hasHeader, columns, rowCount }: P
     [sortCol, sortDesc, delimiter, hasHeader],
   );
 
+  // Scroll horizontally so column `c` sits just past the sticky row-number column.
+  const jumpToColumn = useCallback((c: number) => {
+    parentRef.current?.scrollTo?.({ left: c * COL_W, behavior: "smooth" });
+  }, []);
+
   const totalWidth = NUM_W + columns * COL_W;
   const labels = hasHeader ? header : Array.from({ length: columns }, (_, i) => `${i + 1}`);
 
   return (
-    <div className="table-grid" ref={parentRef} tabIndex={0} data-testid="table-grid">
+    <div className="table-view">
+      <div className="tg-toolbar">
+        <label className="tg-jump">
+          Jump to column
+          <select
+            value=""
+            onChange={(e) => {
+              const c = Number(e.target.value);
+              if (!Number.isNaN(c)) jumpToColumn(c);
+            }}
+          >
+            <option value="">—</option>
+            {labels.map((lbl, c) => (
+              <option key={c} value={c}>
+                {lbl || `Column ${c + 1}`}
+              </option>
+            ))}
+          </select>
+        </label>
+        <span className="tg-meta">
+          {dataRows.toLocaleString()} rows · {columns} cols
+          {sortCol != null &&
+            ` · sorted by ${labels[sortCol] ?? sortCol + 1} ${sortDesc ? "▼" : "▲"}`}
+        </span>
+      </div>
+      <div className="table-grid" ref={parentRef} tabIndex={0} data-testid="table-grid">
       {sortError && (
         <div className="tg-error" role="status">
           {sortError}
@@ -237,6 +267,7 @@ export default function TableGrid({ delimiter, hasHeader, columns, rowCount }: P
             );
           })}
         </div>
+      </div>
       </div>
     </div>
   );

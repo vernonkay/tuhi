@@ -35,10 +35,11 @@ describe("tabular view", () => {
     render(<App />);
     // The grid mounts once the file's sniff resolves.
     expect(await screen.findByTestId("table-grid")).toBeInTheDocument();
-    // The header labels come from the first row.
-    expect(await screen.findByText("name")).toBeInTheDocument();
-    expect(screen.getByText("age")).toBeInTheDocument();
-    expect(screen.getByText("city")).toBeInTheDocument();
+    // The header labels come from the first row (as sortable header buttons; the jump-to-column
+    // selector also lists them as options, so match the button role to disambiguate).
+    expect(await screen.findByRole("button", { name: "name" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "age" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "city" })).toBeInTheDocument();
   });
 
   it("leaves a non-tabular file as text (no grid)", async () => {
@@ -68,6 +69,23 @@ describe("tabular view", () => {
     // Clicking the "age" header sorts by it; an ascending arrow marks the sorted column.
     await user.click(await screen.findByRole("button", { name: /age/ }));
     expect(await screen.findByText("▲")).toBeInTheDocument();
+  });
+
+  it("offers a jump-to-column selector listing every column", async () => {
+    setScenario({
+      tableSniff: { tabular: true, delimiter: ",", columns: 3, has_header: true, row_count: 3 },
+      tableRows: [
+        ["name", "age", "city"],
+        ["Ann", "30", "Wellington"],
+      ],
+    });
+    openFileScenario(CSV, { readonly: false, line_count: 3, char_count: 60 });
+    render(<App />);
+    await screen.findByTestId("table-grid");
+    // The header labels populate the column selector's options.
+    expect(await screen.findByRole("option", { name: "name" })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "age" })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "city" })).toBeInTheDocument();
   });
 
   it("toggles back to the text view with the View as text command", async () => {
