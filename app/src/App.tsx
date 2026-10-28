@@ -4,6 +4,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { ask, open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { readText, writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { useVirtualizer } from "@tanstack/react-virtual";
+import TableGrid from "./TableGrid";
 import hljs from "highlight.js/lib/common";
 import mermaid from "mermaid";
 import katex from "katex";
@@ -151,6 +152,19 @@ function buildOutlineTree(items: OutlineItem[]): OutlineNode[] {
 /** A command-palette entry: a label, an optional hint, its group, and its action. */
 type PaletteItem = { label: string; hint?: string; kind: "command" | "tab" | "file"; run: () => void };
 
+/** The command bar's active mode (#47): Find, Filter, Commands, Go-to-line and Replace are
+ *  one top-centre input with a mode chip and one keyboard model; `null` means it's closed. */
+type CmdMode = "command" | "find" | "replace" | "filter" | "goto";
+
+/** The shape of a delimited file, from the `table_sniff` command, driving the tabular view (#1). */
+type TableSniff = {
+  tabular: boolean;
+  delimiter: string;
+  columns: number;
+  has_header: boolean;
+  row_count: number;
+};
+
 /** The directory part of a path (handles both `/` and `\`). */
 function dirOf(p: string): string {
   const i = Math.max(p.lastIndexOf("/"), p.lastIndexOf("\\"));
@@ -264,6 +278,31 @@ const HIGHLIGHT_MAX_CHARS = 2 * 1024 * 1024;
 // the normal windowed source editor instead. (Lifting even this needs windowed parsing —
 // see the roadmap.) 5 MB comfortably covers large real documents, e.g. a 4 MB export.
 const MD_PREVIEW_MAX_CHARS = 5 * 1024 * 1024;
+
+// Save-As type list, so a new document can be saved as a specific type (and gets the right
+// extension) instead of only "All files". The chosen new-file kind is floated to the top so
+// it's the dialog's default; everything else stays pickable from the dropdown.
+const SAVE_FILTERS: { name: string; extensions: string[] }[] = [
+  { name: "Markdown", extensions: ["md", "markdown"] },
+  { name: "Plain text", extensions: ["txt"] },
+  { name: "JSON", extensions: ["json"] },
+  { name: "HTML", extensions: ["html", "htm"] },
+  { name: "CSS", extensions: ["css"] },
+  { name: "JavaScript", extensions: ["js", "mjs", "cjs"] },
+  { name: "TypeScript", extensions: ["ts", "tsx"] },
+  { name: "YAML", extensions: ["yaml", "yml"] },
+  { name: "TOML", extensions: ["toml"] },
+  { name: "XML", extensions: ["xml"] },
+  { name: "CSV", extensions: ["csv"] },
+  { name: "Log", extensions: ["log"] },
+  { name: "All files", extensions: ["*"] },
+];
+function saveFiltersFor(kind: "md" | "txt" | undefined) {
+  if (!kind) return SAVE_FILTERS;
+  const want = kind === "md" ? "Markdown" : "Plain text";
+  const pick = SAVE_FILTERS.find((f) => f.name === want);
+  return pick ? [pick, ...SAVE_FILTERS.filter((f) => f !== pick)] : SAVE_FILTERS;
+}
 
 /** Platform-appropriate shortcut label: "⌘O" on macOS, "Ctrl+O" elsewhere. */
 const IS_MAC =
@@ -451,9 +490,9 @@ function App() {
     }
   });
 
-  // Studio chrome: one left panel showing Files OR Outline (rail switches it), plus
-  // the command palette. `null` = the left panel is collapsed.
-  const [leftPanel, setLeftPanel] = useState<"files" | "outline" | null>(null);
+  // Studio chrome: one left panel showing Files, Outline, or the Data panel (rail switches it),
+  // plus the command palette. `null` = the left panel is collapsed.
+  const [leftPanel, setLeftPanel] = useState<"files" | "outline" | "data" | null>(null);
   const [treeWidth, setTreeWidth] = useState<number>(() => {
     try {
       const w = Number(localStorage.getItem("tuhi.treeWidth"));
@@ -475,6 +514,18 @@ function App() {
   // A Markdown file opens in the rendered preview by default; this flips it to the
   // raw whole-document source editor (the rail "Source" dot / palette command).
   const [editSource, setEditSource] = useState(false);
+  // Whether the active document looks like JSON, so JSON-only actions (Format JSON) are
+  // offered only in context — never on a file they can't apply to.
+  const [docIsJson, setDocIsJson] = useState(false);
+  // New untitled documents created as Markdown (Ctrl+N → "Markdown"), keyed by tab id, so the
+  // live preview engages before the file has a .md path. Harmless once the tab is saved (the
+  // path then drives isMarkdown). Tab ids are never reused, so stale entries don't collide.
+  const [untitledKinds, setUntitledKinds] = useState<Record<number, "md" | "txt">>({});
+  const [newFileOpen, setNewFileOpen] = useState(false); // the Ctrl+N file-type picker
+  const reopenAppendRef = useRef(false); // re-open a trailing editor after a block is appended
+  // Seamless live preview: after a commit re-parses the blocks, open this block as source next
+  // (set by arrow-navigation across a block boundary; consumed by the blocks effect).
+  const pendingOpenRef = useRef<{ index: number; col: number; fromBelow: boolean } | null>(null);
   const [blocks, setBlocks] = useState<MdBlock[]>([]);
   const [blocksLoading, setBlocksLoading] = useState(false);
   // Edit-in-place: the index of the block currently open as raw source (or null).
@@ -487,10 +538,19 @@ function App() {
   // A Done/Cancel tap on the block editor commits on pointerdown, which re-renders the
   // block; the click that follows must not be read as "open the block now under the finger".
   const swallowClickRef = useRef(false);
-  const [filterOpen, setFilterOpen] = useState(false);
   const [filterQuery, setFilterQuery] = useState("");
   const [filterMatches, setFilterMatches] = useState<FilterMatch[]>([]);
+  const [filterCase, setFilterCase] = useState(false); // case-sensitive filter (data mode)
   const [followOn, setFollowOn] = useState(false);
+  // Data mode: a "lens" over logs and large files that surfaces filter / tail / highlight
+  // in place (a top bar on the editor, a floating LIVE badge, and gutter stripes) with a
+  // side panel for managing highlight rules and reading stats. Auto-on for the large-file
+  // engine and for data/log extensions; the rail "Data" dot toggles it by hand.
+  const [dataMode, setDataMode] = useState(false);
+  // Tabular view (#1): render a delimited file as a grid instead of the text editor. `tableInfo`
+  // holds the sniffed shape (delimiter, columns, header); `tableView` is the live on/off switch.
+  const [tableView, setTableView] = useState(false);
+  const [tableInfo, setTableInfo] = useState<TableSniff | null>(null);
   const [hlEditorOpen, setHlEditorOpen] = useState(false);
   const [hlFromSettings, setHlFromSettings] = useState(false); // did the rules editor open from Settings?
   const [highlighters, setHighlighters] = useState<{ pattern: string; color: string }[]>(() => {
@@ -505,7 +565,6 @@ function App() {
       { pattern: "warn", color: "#ffb81d" },
     ];
   });
-  const [paletteOpen, setPaletteOpen] = useState(false);
   const [paletteQuery, setPaletteQuery] = useState("");
   const [paletteIndex, setPaletteIndex] = useState(0);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -704,8 +763,6 @@ function App() {
   const [busy, setBusy] = useState(false);
 
   // Find / replace
-  const [findOpen, setFindOpen] = useState(false);
-  const [showReplace, setShowReplace] = useState(false);
   const [findQuery, setFindQuery] = useState("");
   const [replaceText, setReplaceText] = useState("");
   const [useRegex, setUseRegex] = useState(false);
@@ -716,13 +773,20 @@ function App() {
   const [searchTrunc, setSearchTrunc] = useState(false);
   const [activeMatch, setActiveMatch] = useState(0);
   // Go-to-line prompt.
-  const [gotoOpen, setGotoOpen] = useState(false);
   const [gotoValue, setGotoValue] = useState("");
+
+  // The command bar (#47): one top-centre input for Find, Filter, Commands, Go-to-line and
+  // Replace. `cmdMode` is the single source of truth; the old per-surface booleans are derived
+  // from it so every existing effect and result surface (in-doc find highlights, the filter
+  // collapse, the command dropdown) keeps working while only the input chrome is unified.
+  const [cmdMode, setCmdMode] = useState<CmdMode | null>(null);
+  const findOpen = cmdMode === "find" || cmdMode === "replace";
+  const filterOpen = cmdMode === "filter";
+  const paletteOpen = cmdMode === "command";
 
   const scrollerRef = useRef<HTMLDivElement>(null);
   const measureRef = useRef<HTMLSpanElement>(null);
-  const findInputRef = useRef<HTMLInputElement>(null);
-  const gotoInputRef = useRef<HTMLInputElement>(null);
+  const cmdInputRef = useRef<HTMLInputElement>(null);
   const charWidthRef = useRef(7.8);
   const [, bumpCw] = useState(0); // forces a re-render after the glyph width is re-measured
   const caretMeasureRef = useRef<HTMLSpanElement>(null);
@@ -757,7 +821,9 @@ function App() {
 
   const lineCount = meta?.line_count ?? 0;
   const readonly = meta?.readonly ?? false;
-  const isMarkdown = !!meta?.path && /\.(md|markdown|mdx)$/i.test(meta.path);
+  const isMarkdown =
+    (!!meta?.path && /\.(md|markdown|mdx)$/i.test(meta.path)) ||
+    (!meta?.path && activeTabId != null && untitledKinds[activeTabId] === "md");
   // The preview renders eagerly, so it is only offered below the size cap; a larger
   // Markdown file opens in the source editor regardless of the toggle (see the cap note).
   const mdPreviewable = isMarkdown && !readonly && (meta?.char_count ?? 0) <= MD_PREVIEW_MAX_CHARS;
@@ -766,6 +832,19 @@ function App() {
   // read-only files always use the plain editor (there is nothing to render, or it would
   // not scale).
   const showLive = !editSource && !!meta && mdPreviewable;
+
+  // Data-ish files: the large-file engine (read-only mmap) or a log/data extension. Used to
+  // auto-engage data mode on open. `dataMode` is the live switch (auto-set, hand-toggleable);
+  // the lens only shows on the plain editor (never over the Markdown preview).
+  const isDataFile =
+    readonly || (!!meta?.path && /\.(log|ndjson|jsonl|csv|tsv|tab|out|err)$/i.test(meta.path));
+  // Delimited files prefer the grid (#1): .csv/.tsv/.tab auto-open as a table (confirmed by sniff).
+  const isTableFile = !!meta?.path && /\.(csv|tsv|tab)$/i.test(meta.path);
+  const lensActive = dataMode && !showLive && !!meta;
+  // The lens collapses the editor to matches while its filter box has a query.
+  const lensFiltering = lensActive && filterQuery.trim().length > 0;
+  // The command bar's Filter mode collapses the editor the same way (outside data mode).
+  const filterCollapse = filterOpen && !lensActive && filterQuery.trim().length > 0;
 
   // Virtualize the preview: only the blocks on screen become DOM nodes, so the preview
   // scales to any block count (the char cap bounds parse/transfer cost, not render). Rows
@@ -952,7 +1031,7 @@ function App() {
   }, []);
 
   const closeGoto = useCallback(() => {
-    setGotoOpen(false);
+    setCmdMode(null);
     scrollerRef.current?.focus();
   }, []);
 
@@ -987,7 +1066,7 @@ function App() {
       setTabs(ts.tabs);
       setActiveTabId(ts.active);
       setAnchor(null);
-      setFindOpen(false);
+      setCmdMode(null);
       setMeta(ts.meta);
       if (ts.meta) {
         if (scrollerRef.current) scrollerRef.current.scrollTop = 0;
@@ -1220,16 +1299,31 @@ function App() {
     }
   }, [applyTabsState, revealInTree, remember]);
 
-  // New empty, untitled document in its own tab (Ctrl/Cmd+N). It has no path until the
-  // first save, which prompts for one via the Save dialog (see handleSave).
-  const handleNew = useCallback(async () => {
-    setError(null);
-    try {
-      await applyTabsState(await invoke<TabsState>("new_document", { dark: darkRef.current }));
-    } catch (e) {
-      setError(String(e));
-    }
-  }, [applyTabsState]);
+  // New document (Ctrl/Cmd+N): ask for the type first (Markdown vs plain text), because a
+  // Markdown doc opens straight into the live, type-as-you-go editor.
+  const handleNew = useCallback(() => {
+    setNewFileOpen(true);
+  }, []);
+
+  // Create the new untitled doc once a type is chosen. Markdown drops into the live preview
+  // and opens a trailing block to type into; plain text uses the normal source editor.
+  const createNewDoc = useCallback(
+    async (kind: "md" | "txt") => {
+      setNewFileOpen(false);
+      setError(null);
+      try {
+        const ts = await invoke<TabsState>("new_document", { dark: darkRef.current });
+        if (ts.active != null) setUntitledKinds((m) => ({ ...m, [ts.active as number]: kind }));
+        setEditSource(false);
+        await applyTabsState(ts);
+        // For Markdown, open the first block for typing once the (empty) blocks have parsed.
+        if (kind === "md") reopenAppendRef.current = true;
+      } catch (e) {
+        setError(String(e));
+      }
+    },
+    [applyTabsState],
+  );
 
   const handleSave = useCallback(async () => {
     if (!meta) return;
@@ -1239,7 +1333,13 @@ function App() {
     let target: string | null = meta.path;
     const wasUntitled = !target; // a new document being saved for the first time (Save As)
     if (!target) {
-      const chosen = await saveDialog({});
+      // Offer a real type list (so you can pick JSON/HTML/etc.), with the new-file kind's type
+      // as the default and a matching default name.
+      const kind = activeTabId != null ? untitledKinds[activeTabId] : undefined;
+      const chosen = await saveDialog({
+        defaultPath: kind === "md" ? "untitled.md" : kind === "txt" ? "untitled.txt" : undefined,
+        filters: saveFiltersFor(kind),
+      });
       if (typeof chosen !== "string") return;
       target = chosen;
     }
@@ -1256,7 +1356,7 @@ function App() {
     } catch (e) {
       setError(String(e));
     }
-  }, [meta, flushTypingNow]);
+  }, [meta, flushTypingNow, activeTabId, untitledKinds]);
 
   // On touch devices there is no Ctrl+S, so save the file automatically a short while after
   // edits settle; desktop keeps explicit save. Only a dirty, writable file with a path —
@@ -1461,7 +1561,7 @@ function App() {
   const openPalette = useCallback(() => {
     setPaletteQuery("");
     setPaletteIndex(0);
-    setPaletteOpen(true);
+    setCmdMode("command");
   }, []);
 
   // Undo / redo. The Rust buffer owns the history and rehighlights itself; here we
@@ -1507,6 +1607,32 @@ function App() {
     });
   }, [meta, readonly, enqueue, flushTypingNow, setCaretFromIdx]);
 
+  // Sniff whether the active doc is JSON (extension first, else the first non-space char),
+  // so the Format JSON control only appears where it applies. Re-runs on open/tab switch.
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      if (!meta || readonly) {
+        setDocIsJson(false);
+        return;
+      }
+      const p = (meta.path ?? "").toLowerCase();
+      if (/\.(json|jsonc|json5|geojson|webmanifest)$/.test(p)) {
+        setDocIsJson(true);
+        return;
+      }
+      try {
+        const head = await invoke<string>("read_range", { start: 0, end: Math.min(256, meta.char_count) });
+        if (!cancelled) setDocIsJson(/^\s*[[{]/.test(head));
+      } catch {
+        if (!cancelled) setDocIsJson(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [meta?.path, readonly, activeTabId]);
+
   // Live filter-to-view: show only the lines matching a regex (non-destructive).
   // Works on any size, including the read-only mmap engine, so huge logs filter too.
   const runFilter = useCallback(
@@ -1517,27 +1643,21 @@ function App() {
       }
       try {
         setFilterMatches(
-          await invoke<FilterMatch[]>("filter_lines", { query: q, useRegex: true, caseSensitive: false }),
+          await invoke<FilterMatch[]>("filter_lines", { query: q, useRegex: true, caseSensitive: filterCase }),
         );
       } catch {
         setFilterMatches([]); // invalid regex (mid-typing) → show nothing yet
       }
     },
-    [meta],
+    [meta, filterCase],
   );
 
   const openFilter = useCallback(() => {
     if (!meta) return;
     setFilterQuery("");
     setFilterMatches([]);
-    setFilterOpen(true);
+    setCmdMode("filter");
   }, [meta]);
-
-  const closeFilter = useCallback(() => {
-    setFilterOpen(false);
-    setFilterMatches([]);
-    scrollerRef.current?.focus();
-  }, []);
 
   // Highlighters: persist the rules, compile them once, expose a per-line matcher.
   useEffect(() => {
@@ -1834,54 +1954,93 @@ function App() {
       if (!meta) return;
       // Replace needs an editable buffer; find alone works on the large-file engine.
       if (replace && readonly) return;
-      setFindOpen(true);
-      setShowReplace(replace && !readonly);
-      setTimeout(() => findInputRef.current?.focus(), 0);
+      setCmdMode(replace && !readonly ? "replace" : "find");
     },
     [meta, readonly],
   );
 
-  const closeFind = useCallback(() => {
-    setFindOpen(false);
+  // Close the command bar from any mode (its ✕, a backdrop click, or Esc): clears every
+  // mode's result state so nothing lingers, then returns focus to the editor.
+  const closeCmd = useCallback(() => {
+    setCmdMode(null);
     setMatches([]);
     setRoHits([]);
     setSearchTrunc(false);
+    setFilterMatches([]);
     scrollerRef.current?.focus();
   }, []);
+
+  // One input serves every mode, so focus it whenever the bar opens or the mode changes.
+  useEffect(() => {
+    if (cmdMode) setTimeout(() => cmdInputRef.current?.focus(), 0);
+  }, [cmdMode]);
 
   // Esc closes whatever chrome is open, topmost first: a modal, then find/filter, then a
   // gutter panel. (A second click on the same dot toggles it closed too.) Find and the
   // palette also handle Esc on their own focused inputs; this covers everything else.
   useEffect(() => {
     const anyOpen =
-      settingsOpen || hlEditorOpen || paletteOpen || filterOpen || findOpen || gotoOpen || leftPanel !== null;
+      newFileOpen || settingsOpen || hlEditorOpen || cmdMode !== null || leftPanel !== null;
     if (!anyOpen) return;
     const onEsc = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
       e.preventDefault();
-      if (settingsOpen) setSettingsOpen(false);
+      if (newFileOpen) setNewFileOpen(false);
+      else if (settingsOpen) setSettingsOpen(false);
       else if (hlEditorOpen) closeHlEditor();
-      else if (paletteOpen) setPaletteOpen(false);
-      else if (filterOpen) closeFilter();
-      else if (gotoOpen) closeGoto();
-      else if (findOpen) closeFind();
+      else if (cmdMode) closeCmd();
       else if (leftPanel) setLeftPanel(null);
     };
     window.addEventListener("keydown", onEsc);
     return () => window.removeEventListener("keydown", onEsc);
-  }, [settingsOpen, hlEditorOpen, paletteOpen, filterOpen, findOpen, gotoOpen, leftPanel, closeHlEditor, closeFilter, closeFind, closeGoto]);
+  }, [newFileOpen, settingsOpen, hlEditorOpen, cmdMode, leftPanel, closeHlEditor, closeCmd]);
 
   // Re-run the search as the query or options change while the bar is open.
   useEffect(() => {
     if (findOpen) void runSearch(findQuery);
   }, [findQuery, useRegex, caseSensitive, findOpen, runSearch]);
 
-  // Debounced live filter as the filter query changes.
+  // Debounced live filter as the filter query (or case option) changes, for both the classic
+  // filter overlay and the data-mode lens.
   useEffect(() => {
-    if (!filterOpen) return;
+    if (!filterOpen && !lensActive) return;
     const t = setTimeout(() => void runFilter(filterQuery), 150);
     return () => clearTimeout(t);
-  }, [filterQuery, filterOpen, runFilter]);
+  }, [filterQuery, filterCase, filterOpen, lensActive, runFilter]);
+
+  // Auto-engage data mode when the active file changes: on for the large-file engine and for
+  // log/data extensions, off otherwise. Keyed on the path + engine only (not char_count), so a
+  // hand toggle survives editing and only a tab switch / reopen recomputes it.
+  useEffect(() => {
+    // Reset the per-file views, then pick the default for this file: a delimited file opens as a
+    // grid (confirmed by sniffing — csv/tsv that isn't really tabular falls back to data mode),
+    // the large-file engine and logs open in data mode, everything else plain.
+    setTableView(false);
+    setTableInfo(null);
+    if (isTableFile) {
+      setDataMode(false);
+      let cancelled = false;
+      void (async () => {
+        try {
+          const s = await invoke<TableSniff>("table_sniff");
+          if (cancelled) return;
+          if (s.tabular) {
+            setTableInfo(s);
+            setTableView(true);
+          } else {
+            setDataMode(isDataFile);
+          }
+        } catch {
+          if (!cancelled) setDataMode(isDataFile);
+        }
+      })();
+      return () => {
+        cancelled = true;
+      };
+    }
+    setDataMode(isDataFile);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [meta?.path, readonly]);
 
   // Session restore on mount. If the Rust process still has tabs (a dev hot-reload),
   // adopt them. Otherwise (a real restart) reopen the files that were open last time,
@@ -1970,8 +2129,7 @@ function App() {
           if (meta) {
             e.preventDefault();
             setGotoValue("");
-            setGotoOpen(true);
-            setTimeout(() => gotoInputRef.current?.focus(), 0);
+            setCmdMode("goto");
           }
           break;
         case "h":
@@ -1994,9 +2152,7 @@ function App() {
           break;
         case "p":
           e.preventDefault();
-          setPaletteQuery("");
-          setPaletteIndex(0);
-          setPaletteOpen(true);
+          openPalette();
           break;
         default:
           break;
@@ -2004,7 +2160,7 @@ function App() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [handleNew, handleOpen, handleSave, closeActiveTab, openFind, undoRedo, meta, readonly]);
+  }, [handleNew, handleOpen, handleSave, closeActiveTab, openFind, openPalette, undoRedo, meta, readonly]);
 
   // --- Movement (extend = hold Shift to grow the selection) ---
 
@@ -2249,22 +2405,74 @@ function App() {
   // (so no dangling blank line); Rust restores the terminator on write-back.
   const editSeed = (b: MdBlock) => b.source.replace(/\n$/, "");
 
-  const beginEdit = (i: number) => {
+  // Place the caret inside the just-mounted block editor: at a column on the first or last line
+  // (arrow navigation arriving from the adjacent block), otherwise at the end (click / default).
+  const placeInTa = (ta: HTMLTextAreaElement, place?: { col?: number; fromBelow?: boolean }) => {
+    ta.focus();
+    autosizeEdit(ta);
+    const v = ta.value;
+    if (place?.col != null) {
+      if (place.fromBelow) {
+        const lineStart = v.lastIndexOf("\n") + 1; // last line (arrived going up)
+        const off = lineStart + Math.min(place.col, v.length - lineStart);
+        ta.setSelectionRange(off, off);
+      } else {
+        const firstNl = v.indexOf("\n"); // first line (arrived going down)
+        const lineLen = firstNl === -1 ? v.length : firstNl;
+        const off = Math.min(place.col, lineLen);
+        ta.setSelectionRange(off, off);
+      }
+      return;
+    }
+    const n = v.length;
+    ta.setSelectionRange(n, n);
+  };
+
+  const beginEdit = (i: number, place?: { col?: number; fromBelow?: boolean }) => {
     if (!showLive || i < 0 || i >= blocks.length) return;
     skipCommitRef.current = false;
     editBlockRef.current = i;
     setEditBlock(i);
-    // Focus, size and place the caret at the end once the textarea has mounted
-    // (same deferred-focus pattern as the go-to-line and find inputs).
+    // Focus, size and place the caret once the textarea has mounted (same deferred-focus
+    // pattern as the go-to-line and find inputs).
+    setTimeout(() => {
+      const ta = editAreaRef.current;
+      if (ta) placeInTa(ta, place);
+    }, 0);
+  };
+
+  // Open a trailing editor to append the next block (type-as-you-go). The append index is
+  // one past the last block; commitEdit routes it to append_block rather than replace_block.
+  const beginAppend = () => {
+    if (!showLive || readonly) return;
+    skipCommitRef.current = false;
+    const i = blocks.length;
+    editBlockRef.current = i;
+    setEditBlock(i);
     setTimeout(() => {
       const ta = editAreaRef.current;
       if (!ta) return;
       ta.focus();
       autosizeEdit(ta);
-      const n = ta.value.length;
-      ta.setSelectionRange(n, n);
     }, 0);
   };
+
+  // After a block is appended, or a fresh Markdown doc opens, drop a trailing editor in so
+  // typing continues block by block without a click between each.
+  useEffect(() => {
+    if (!showLive || readonly) return;
+    if (reopenAppendRef.current) {
+      reopenAppendRef.current = false;
+      beginAppend();
+      return;
+    }
+    if (pendingOpenRef.current) {
+      const p = pendingOpenRef.current;
+      pendingOpenRef.current = null;
+      if (p.index < blocks.length) beginEdit(p.index, { col: p.col, fromBelow: p.fromBelow });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [blocks, showLive, readonly]);
 
   const cancelEdit = () => {
     skipCommitRef.current = true; // the blur that follows must not commit
@@ -2272,13 +2480,28 @@ function App() {
     setEditBlock(null);
   };
 
-  const commitEdit = async (value: string) => {
+  // Returns true if the commit issued a write and the blocks will re-parse (so a follow-up open
+  // must wait for the new blocks), false if it was a no-op (unchanged / empty — open now).
+  const commitEdit = async (value: string): Promise<boolean> => {
     const i = editBlockRef.current;
-    if (i == null) return;
-    const b = blocks[i];
+    if (i == null) return false;
     editBlockRef.current = null; // guard re-entry (the blur after Ctrl+Enter)
     setEditBlock(null);
-    if (!b || value === editSeed(b)) return; // unchanged: skip the round-trip
+    // Appending a new trailing block (index at or past the end): type-as-you-go.
+    if (i >= blocks.length) {
+      if (!value.trim()) return false; // nothing typed
+      try {
+        const m = await invoke<DocumentMeta>("append_block", { text: value });
+        setMeta(m); // re-parses the blocks (effect above)
+        reopenAppendRef.current = true; // then open a fresh trailing editor to keep going
+        return true;
+      } catch (e) {
+        console.error("append_block failed", e);
+        return false;
+      }
+    }
+    const b = blocks[i];
+    if (!b || value === editSeed(b)) return false; // unchanged: skip the round-trip
     try {
       const m = await invoke<DocumentMeta>("replace_block", {
         startLine: b.start_line,
@@ -2286,9 +2509,27 @@ function App() {
         text: value,
       });
       setMeta(m); // the char_count change re-parses the blocks (effect above)
+      return true;
     } catch (e) {
       console.error("replace_block failed", e);
+      return false;
     }
+  };
+
+  // Seamless live preview: moving the caret past the top or bottom edge of the active block
+  // commits it (so it renders) and opens the adjacent block as source at the same column — this
+  // is what makes the whole document feel like one editing surface rather than a stack of boxes.
+  const moveToBlock = async (value: string, targetIndex: number, col: number, fromBelow: boolean) => {
+    const reparsed = await commitEdit(value);
+    if (targetIndex < 0) return; // above the first block: leave it rendered, no active block
+    if (targetIndex >= blocks.length) {
+      // past the last block: keep writing in a fresh trailing editor (type-as-you-go)
+      if (reparsed) reopenAppendRef.current = true;
+      else beginAppend();
+      return;
+    }
+    if (reparsed) pendingOpenRef.current = { index: targetIndex, col, fromBelow };
+    else beginEdit(targetIndex, { col, fromBelow });
   };
 
   const onBlockEditKey = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -2296,11 +2537,53 @@ function App() {
       e.preventDefault();
       e.stopPropagation();
       cancelEdit();
-    } else if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+      return;
+    }
+    if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
       e.preventDefault();
       void commitEdit(e.currentTarget.value);
+      return;
     }
-    // Plain Enter and everything else stay in the textarea (a block may be multi-line).
+    // Seamless navigation: an arrow past the block's top or bottom edge carries the caret into
+    // the adjacent block (which opens as source), so the cursor flows through the whole document.
+    if (
+      !IS_MOBILE &&
+      !e.shiftKey &&
+      !e.ctrlKey &&
+      !e.metaKey &&
+      !e.altKey &&
+      (e.key === "ArrowDown" || e.key === "ArrowUp")
+    ) {
+      const ta = e.currentTarget;
+      const i = editBlockRef.current;
+      if (i != null) {
+        const caret = ta.selectionStart;
+        if (e.key === "ArrowDown" && ta.value.indexOf("\n", caret) === -1) {
+          e.preventDefault();
+          const lineStart = ta.value.lastIndexOf("\n", caret - 1) + 1;
+          void moveToBlock(ta.value, i + 1, caret - lineStart, false);
+          return;
+        }
+        if (e.key === "ArrowUp" && ta.value.lastIndexOf("\n", caret - 1) === -1) {
+          e.preventDefault();
+          void moveToBlock(ta.value, i - 1, caret, true);
+          return;
+        }
+      }
+    }
+    // Type-as-you-go: while writing a new trailing block, a blank line ends it (Markdown's own
+    // block rule), so you flow straight into the next block without reaching for Ctrl+Enter.
+    // Single Enter still adds a line within the block (lists, code); Shift+Enter always does.
+    if (e.key === "Enter" && !e.shiftKey && editBlockRef.current != null && editBlockRef.current >= blocks.length) {
+      const ta = e.currentTarget;
+      const caret = ta.selectionStart;
+      const atBlankLine = caret > 0 && ta.value[caret - 1] === "\n";
+      if (atBlankLine && ta.value.slice(0, caret).trim() !== "") {
+        e.preventDefault();
+        void commitEdit(ta.value.replace(/\n+$/, ""));
+      }
+    }
+    // Plain Enter otherwise stays in the textarea (a block may be multi-line).
   };
 
   const onBlockEditBlur = (e: React.FocusEvent<HTMLTextAreaElement>) => {
@@ -2464,33 +2747,35 @@ function App() {
             onBlur={onBlockEditBlur}
             onInput={(e) => autosizeEdit(e.currentTarget)}
           />
-          <div className="md-blockedit-bar">
-            <button
-              type="button"
-              className="be-btn be-cancel"
-              onPointerDown={(e) => {
-                e.preventDefault();
-                swallowClickRef.current = true;
-                cancelEdit();
-              }}
-            >
-              Cancel
-            </button>
-            <button
-              type="button"
-              className="be-btn be-done"
-              onPointerDown={(e) => {
-                e.preventDefault();
-                swallowClickRef.current = true;
-                void commitEdit(editAreaRef.current?.value ?? "");
-              }}
-            >
-              Done
-            </button>
-            <span className="md-blockedit-hint">
-              <b>{combo("Enter")}</b> · <b>Esc</b>
-            </span>
-          </div>
+          {IS_MOBILE && (
+            <div className="md-blockedit-bar">
+              <button
+                type="button"
+                className="be-btn be-cancel"
+                onPointerDown={(e) => {
+                  e.preventDefault();
+                  swallowClickRef.current = true;
+                  cancelEdit();
+                }}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="be-btn be-done"
+                onPointerDown={(e) => {
+                  e.preventDefault();
+                  swallowClickRef.current = true;
+                  void commitEdit(editAreaRef.current?.value ?? "");
+                }}
+              >
+                Done
+              </button>
+              <span className="md-blockedit-hint">
+                <b>{combo("Enter")}</b> · <b>Esc</b>
+              </span>
+            </div>
+          )}
         </div>
       );
     }
@@ -2568,10 +2853,37 @@ function App() {
       ...(folderRoot && parentDir(folderRoot) ? [{ label: "Up to parent folder", kind: C, run: () => void goUp() }] : []),
       ...(meta ? [{ label: "Save", hint: combo("S"), kind: C, run: () => void handleSave() }] : []),
       ...(meta ? [{ label: "Find in file…", hint: combo("F"), kind: C, run: () => openFind(false) }] : []),
-      ...(meta ? [{ label: "Go to line…", hint: combo("G"), kind: C, run: () => { setGotoValue(""); setGotoOpen(true); setTimeout(() => gotoInputRef.current?.focus(), 0); } }] : []),
+      ...(meta ? [{ label: "Go to line…", hint: combo("G"), kind: C, run: () => { setGotoValue(""); setCmdMode("goto"); } }] : []),
       ...(meta && mdPreviewable ? [{ label: showLive ? "Edit Markdown source" : "Preview Markdown", kind: C, run: () => setEditSource((v) => !v) }] : []),
-      ...(meta && !readonly ? [{ label: "Format JSON (pretty-print)", kind: C, run: () => void formatJson() }] : []),
+      ...(meta && !readonly && docIsJson ? [{ label: "Format JSON (pretty-print)", kind: C, run: () => void formatJson() }] : []),
       ...(meta ? [{ label: "Filter lines to view…", kind: C, run: () => openFilter() }] : []),
+      ...(meta ? [{ label: dataMode ? "Exit data mode" : "Data mode (filter · tail · highlight)", kind: C, run: () => setDataMode((v) => !v) }] : []),
+      ...(meta
+        ? [
+            {
+              label: tableView ? "View as text" : "View as table",
+              kind: C,
+              run: () => {
+                if (tableView) {
+                  setTableView(false);
+                  return;
+                }
+                void (async () => {
+                  try {
+                    const s = await invoke<TableSniff>("table_sniff");
+                    if (s.tabular) {
+                      setTableInfo(s);
+                      setTableView(true);
+                      setDataMode(false);
+                    }
+                  } catch {
+                    /* not tabular / nothing open — leave the text view */
+                  }
+                })();
+              },
+            },
+          ]
+        : []),
       ...(meta?.path ? [{ label: followOn ? "Stop following file" : "Follow file (tail)", kind: C, run: () => toggleFollow() }] : []),
       { label: "Edit highlighters…", kind: C, run: () => { setHlFromSettings(false); setHlEditorOpen(true); } },
       { label: "Settings…", kind: C, run: () => setSettingsOpen(true) },
@@ -2592,7 +2904,7 @@ function App() {
   const onPaletteKey = (e: React.KeyboardEvent) => {
     if (e.key === "Escape") {
       e.preventDefault();
-      setPaletteOpen(false);
+      closeCmd();
     } else if (e.key === "ArrowDown") {
       e.preventDefault();
       setPaletteIndex((i) => Math.min(i + 1, paletteFiltered.length - 1));
@@ -2603,11 +2915,242 @@ function App() {
       e.preventDefault();
       const it = paletteFiltered[paletteIndex];
       if (it) {
+        // Close first, then run: a command that opens another mode (Find, Filter, Go to line)
+        // sets `cmdMode` after this clear, so its mode wins instead of being closed under it.
+        setCmdMode(null);
         it.run();
-        setPaletteOpen(false);
       }
     }
   };
+
+  // --- Command bar plumbing (#47): one input, mode-driven value / change / key. ---
+  const CMD_CHIP: Record<CmdMode, string> = {
+    command: "Run",
+    find: "Find",
+    replace: "Replace",
+    filter: "Filter",
+    goto: "Line",
+  };
+  const CMD_PLACEHOLDER: Record<CmdMode, string> = {
+    command: "Open a file or run a command  (/ find · = filter · : line)",
+    find: "Find in file",
+    replace: "Find",
+    filter: "Filter lines by regex (e.g. ERROR|WARN)…",
+    goto: `Go to line (1–${lineCount.toLocaleString()})`,
+  };
+  const cmdValue =
+    cmdMode === "command"
+      ? paletteQuery
+      : cmdMode === "goto"
+        ? gotoValue
+        : cmdMode === "filter"
+          ? filterQuery
+          : findQuery; // find | replace
+
+  const onCmdInput = (v: string) => {
+    if (cmdMode === "command") {
+      // Leading prefixes jump straight to a mode: `/` find · `=` filter · `:` line (need a file).
+      if (meta && v.startsWith("/")) { setFindQuery(v.slice(1)); setCmdMode("find"); return; }
+      if (meta && v.startsWith("=")) { setFilterQuery(v.slice(1)); setCmdMode("filter"); return; }
+      if (meta && v.startsWith(":")) { setGotoValue(v.slice(1).replace(/[^0-9]/g, "")); setCmdMode("goto"); return; }
+      setPaletteQuery(v);
+      setPaletteIndex(0);
+    } else if (cmdMode === "goto") {
+      setGotoValue(v.replace(/[^0-9]/g, ""));
+    } else if (cmdMode === "filter") {
+      setFilterQuery(v);
+    } else {
+      setFindQuery(v); // find | replace
+    }
+  };
+
+  const onCmdKey = (e: React.KeyboardEvent) => {
+    if (e.key === "Escape") {
+      e.preventDefault();
+      closeCmd();
+      return;
+    }
+    if (cmdMode === "command") {
+      onPaletteKey(e);
+      return;
+    }
+    if (e.key === "Enter") {
+      e.preventDefault();
+      if (cmdMode === "find" || cmdMode === "replace") {
+        void gotoMatch(e.shiftKey ? activeMatch - 1 : activeMatch + 1);
+      } else if (cmdMode === "goto") {
+        submitGoto();
+      }
+      // filter is live — Enter just keeps the collapsed view in place.
+    }
+  };
+
+  // The collapse-to-matches list, shared by the command bar's Filter mode and the data-mode lens.
+  // `onPick` decides what a row click does (close the bar, or clear the lens, then jump).
+  const renderFilterList = (onPick: (line: number) => void): React.ReactNode => (
+    <div className="filter-list">
+      {filterMatches.length ? (
+        filterMatches.map((m) => {
+          const hl = lineHighlight(m.text);
+          return (
+            <div
+              key={m.line}
+              className="filter-row"
+              style={hl ? { boxShadow: `inset 3px 0 0 ${hl}`, background: `${hl}14` } : undefined}
+              onClick={() => onPick(m.line)}
+              title={`Go to line ${m.line + 1}`}
+            >
+              <span className="filter-gutter">{m.line + 1}</span>
+              <span className="filter-text">
+                {renderLine(m.text.replace(/\r?\n$/, ""), [])}
+                {m.truncated && <span className="trunc"> ⋯</span>}
+              </span>
+            </div>
+          );
+        })
+      ) : (
+        <div className="filter-empty">
+          {filterQuery
+            ? "No matching lines"
+            : "Type a regex to collapse the document to just the matching lines."}
+        </div>
+      )}
+    </div>
+  );
+
+  // The data-mode lens bar: filter box, case toggle, tail, match count, and a button to the
+  // Data panel (highlight rules + stats). Sits above the editor; the gutter stripes and the
+  // LIVE badge complete the lens.
+  const lensBar = (
+    <div className="lensbar">
+      <span className="lens-tag">DATA</span>
+      <input
+        className="lens-input"
+        placeholder="Filter lines by regex (e.g. ERROR|WARN)…"
+        value={filterQuery}
+        onChange={(e) => setFilterQuery(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Escape") {
+            e.preventDefault();
+            setFilterQuery("");
+            scrollerRef.current?.focus();
+          }
+        }}
+      />
+      <button
+        className={`lens-btn${filterCase ? " on" : ""}`}
+        onClick={() => setFilterCase((v) => !v)}
+        title="Match case"
+      >
+        Aa
+      </button>
+      {meta?.path && (
+        <button
+          className={`lens-btn tail${followOn ? " on" : ""}`}
+          onClick={toggleFollow}
+          title="Follow the file as it grows (tail -f)"
+        >
+          {followOn ? "● Tail" : "Tail"}
+        </button>
+      )}
+      <span className="lens-count">
+        {lensFiltering
+          ? filterMatches.length >= 1000
+            ? "1000+ matches"
+            : `${filterMatches.length} match${filterMatches.length === 1 ? "" : "es"}`
+          : `${lineCount.toLocaleString()} lines`}
+      </span>
+      <button
+        className={`lens-btn${leftPanel === "data" ? " on" : ""}`}
+        onClick={() => setLeftPanel((v) => (v === "data" ? null : "data"))}
+        title="Highlight rules & stats"
+      >
+        Rules
+      </button>
+    </div>
+  );
+
+  // The thin "rail panel" half of data mode: manage highlight rules, the filter case option,
+  // and read live stats. Opened from the lens bar's Rules button (or the rail), it reuses the
+  // docked-panel chrome (so the reading column holds its place).
+  const dataPanel = (
+    <>
+      <div className="op-head" style={{ display: "flex", alignItems: "center" }}>
+        Data
+        <button className="over-close" style={{ marginLeft: "auto" }} onClick={() => setLeftPanel(null)} title="Close">×</button>
+      </div>
+      <div className="dp-body">
+        <div className="dp-sec">
+          <div className="dp-label">Highlight rules</div>
+          {highlighters.length ? (
+            highlighters.map((h, i) => (
+              <div className="hl-row" key={i}>
+                <input
+                  className="hl-pattern"
+                  value={h.pattern}
+                  placeholder="regex, e.g. ERROR|fatal"
+                  onChange={(e) =>
+                    setHighlighters((rs) => rs.map((r, j) => (j === i ? { ...r, pattern: e.target.value } : r)))
+                  }
+                />
+                <input
+                  className="hl-color"
+                  type="color"
+                  value={h.color}
+                  onChange={(e) =>
+                    setHighlighters((rs) => rs.map((r, j) => (j === i ? { ...r, color: e.target.value } : r)))
+                  }
+                />
+                <button
+                  className="hl-del"
+                  title="Remove rule"
+                  onClick={() => setHighlighters((rs) => rs.filter((_, j) => j !== i))}
+                >
+                  ×
+                </button>
+              </div>
+            ))
+          ) : (
+            <p className="dp-empty">No rules yet — add one to tint matching lines.</p>
+          )}
+          <button
+            className="dp-add"
+            onClick={() => setHighlighters((rs) => [...rs, { pattern: "", color: "#ff5a36" }])}
+          >
+            + Add rule
+          </button>
+        </div>
+        <div className="dp-sec">
+          <div className="dp-label">Filter</div>
+          <label className="dp-check">
+            <input type="checkbox" checked={filterCase} onChange={(e) => setFilterCase(e.target.checked)} />
+            Match case
+          </label>
+        </div>
+        <div className="dp-sec">
+          <div className="dp-label">Stats</div>
+          <div className="dp-stat"><span>Lines</span><b>{lineCount.toLocaleString()}</b></div>
+          <div className="dp-stat"><span>Characters</span><b>{(meta?.char_count ?? 0).toLocaleString()}</b></div>
+          {lensFiltering && (
+            <div className="dp-stat"><span>Matches</span><b>{filterMatches.length >= 1000 ? "1000+" : filterMatches.length.toLocaleString()}</b></div>
+          )}
+          <div className="dp-stat"><span>Engine</span><b>{readonly ? "memory-mapped" : "in-memory"}</b></div>
+        </div>
+      </div>
+    </>
+  );
+
+  // The floating LIVE / Tail badge, bottom-right of the editor, the last piece of the lens.
+  const liveBadge = (
+    <button
+      className={`live-badge${followOn ? " on" : ""}`}
+      onClick={toggleFollow}
+      title={followOn ? "Following (tail -f) — click to stop" : "Follow the file as it grows (tail -f)"}
+    >
+      <span className="lb-dot" />
+      {followOn ? "LIVE" : "Tail"}
+    </button>
+  );
 
   return (
     <div className={`shell tg${IS_MOBILE ? " mobile" : ""}`}>
@@ -2615,17 +3158,12 @@ function App() {
         <div className="gut-cap">
           <Mark size={20} />
         </div>
-        <button className="gut-dot-btn" onClick={() => void handleNew()} title={`New file (${combo("N")})`}>
-          <span className="gd" />
-          <span className="gd-label">New file</span>
-        </button>
         <button
           className={`gut-dot-btn${leftPanel === "files" ? " on" : ""}`}
           onClick={() => {
             if (leftPanel === "files") setLeftPanel(null);
             else {
-              closeFind();
-              closeFilter();
+              closeCmd();
               setLeftPanel("files");
             }
           }}
@@ -2635,49 +3173,27 @@ function App() {
           <span className="gd-label">Files</span>
         </button>
         <button
-          className={`gut-dot-btn${findOpen ? " on" : ""}`}
+          className={`gut-dot-btn${cmdMode ? " on" : ""}`}
           onClick={() => {
-            if (findOpen) closeFind();
+            if (cmdMode) closeCmd();
             else {
               setLeftPanel(null);
-              closeFilter();
-              openFind(false);
+              openPalette();
             }
           }}
-          disabled={!meta}
-          title={`Find (${combo("F")})`}
+          title={`Search & commands (${combo("P")}) — find, filter, go to line, run anything`}
         >
           <span className="gd" />
-          <span className="gd-label">Find</span>
+          <span className="gd-label">Search</span>
         </button>
         <button
-          className={`gut-dot-btn${filterOpen ? " on" : ""}`}
-          onClick={() => {
-            if (filterOpen) closeFilter();
-            else {
-              setLeftPanel(null);
-              closeFind();
-              openFilter();
-            }
-          }}
+          className={`gut-dot-btn${dataMode ? " on" : ""}`}
+          onClick={() => setDataMode((v) => !v)}
           disabled={!meta}
-          title="Filter lines to view"
+          title="Data mode — filter · tail · highlight for logs & big files"
         >
           <span className="gd" />
-          <span className="gd-label">Filter</span>
-        </button>
-        <button
-          className="gut-dot-btn"
-          onClick={() => void formatJson()}
-          disabled={!meta || readonly}
-          title="Format JSON (pretty-print)"
-        >
-          <span className="gd" />
-          <span className="gd-label">Format JSON</span>
-        </button>
-        <button className="gut-dot-btn" onClick={openPalette} title={`Command palette (${combo("P")})`}>
-          <span className="gd" />
-          <span className="gd-label">Commands</span>
+          <span className="gd-label">Data</span>
         </button>
         <button className="gut-dot-btn" onClick={() => setSettingsOpen(true)} title="Settings">
           <span className="gd" />
@@ -2738,7 +3254,12 @@ function App() {
           </button>
         </div>
       </header>
-      <div className="body">
+      <div
+        className="body"
+        // Expose the docked panel's width to CSS so the Markdown reading column can hold its
+        // screen position while there's margin to consume (see .mdview-inner in App.css).
+        style={leftPanel ? ({ "--panel-w": `${treeWidth}px` } as React.CSSProperties) : undefined}
+      >
       {leftPanel && (
         <aside
           className={`over ${leftPanel === "outline" ? "over-r" : "over-l"}`}
@@ -2802,6 +3323,8 @@ function App() {
                 )}
               </div>
             </>
+          ) : leftPanel === "data" ? (
+            dataPanel
           ) : (
             <>
               <div className="op-head" style={{ display: "flex", alignItems: "center" }}>
@@ -2860,77 +3383,110 @@ function App() {
 
       {error && <div className="error">{error}</div>}
 
-      {gotoOpen && (
-        <div className="findbar">
-          <div className="find-row">
-            <input
-              ref={gotoInputRef}
-              className="find-input"
-              placeholder={`Go to line (1–${lineCount.toLocaleString()})`}
-              value={gotoValue}
-              inputMode="numeric"
-              onChange={(e) => setGotoValue(e.target.value.replace(/[^0-9]/g, ""))}
-              onKeyDown={(e) => {
-                if (e.key === "Escape") {
-                  e.preventDefault();
-                  closeGoto();
-                } else if (e.key === "Enter") {
-                  e.preventDefault();
-                  submitGoto();
-                }
-              }}
-            />
-            <button className="find-btn" onClick={submitGoto} title="Go (Enter)">↵</button>
-            <button className="find-btn" onClick={closeGoto} title="Close (Esc)">✕</button>
-          </div>
-        </div>
-      )}
-
-      {findOpen && (
-        <div className="findbar">
-          <div className="find-row">
-            <input
-              ref={findInputRef}
-              className="find-input"
-              placeholder="Find"
-              value={findQuery}
-              onChange={(e) => setFindQuery(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Escape") {
-                  e.preventDefault();
-                  closeFind();
-                } else if (e.key === "Enter") {
-                  e.preventDefault();
-                  void gotoMatch(e.shiftKey ? activeMatch - 1 : activeMatch + 1);
-                }
-              }}
-            />
-            <span className="find-count">
-              {(() => {
-                const n = readonly ? roHits.length : matches.length;
-                return n ? `${activeMatch + 1} / ${n}${readonly && searchTrunc ? "+" : ""}` : "0 results";
-              })()}
-            </span>
-            <button className="find-btn" onClick={() => void gotoMatch(activeMatch - 1)} title="Previous (Shift+Enter)">↑</button>
-            <button className="find-btn" onClick={() => void gotoMatch(activeMatch + 1)} title="Next (Enter)">↓</button>
-            <button className={`find-toggle${caseSensitive ? " on" : ""}`} onClick={() => setCaseSensitive((v) => !v)} title="Match case">Aa</button>
-            <button className={`find-toggle${useRegex ? " on" : ""}`} onClick={() => setUseRegex((v) => !v)} title="Regular expression">.*</button>
-            {!readonly && (
-              <button className={`find-toggle${showReplace ? " on" : ""}`} onClick={() => setShowReplace((v) => !v)} title="Toggle replace">⇄</button>
-            )}
-            <button className="find-btn" onClick={closeFind} title="Close (Esc)">✕</button>
-          </div>
-          {showReplace && (
-            <div className="find-row">
+      {cmdMode && (
+        <div className="cmdbar-overlay" onMouseDown={() => closeCmd()}>
+          <div className={`cmdbar mode-${cmdMode}`} onMouseDown={(e) => e.stopPropagation()}>
+            <div className="cmd-row">
+              <span className="cmd-chip">{CMD_CHIP[cmdMode]}</span>
               <input
-                className="find-input"
-                placeholder="Replace"
-                value={replaceText}
-                onChange={(e) => setReplaceText(e.target.value)}
+                ref={cmdInputRef}
+                className="cmd-input"
+                placeholder={CMD_PLACEHOLDER[cmdMode]}
+                value={cmdValue}
+                inputMode={cmdMode === "goto" ? "numeric" : undefined}
+                onChange={(e) => onCmdInput(e.target.value)}
+                onKeyDown={onCmdKey}
               />
-              <button className="find-btn wide" onClick={() => void doReplaceAll()}>Replace all</button>
+              {(cmdMode === "find" || cmdMode === "replace") && (
+                <>
+                  <span className="cmd-count">
+                    {(() => {
+                      const n = readonly ? roHits.length : matches.length;
+                      return n ? `${activeMatch + 1} / ${n}${readonly && searchTrunc ? "+" : ""}` : "0 results";
+                    })()}
+                  </span>
+                  <button className="find-btn" onClick={() => void gotoMatch(activeMatch - 1)} title="Previous (Shift+Enter)">↑</button>
+                  <button className="find-btn" onClick={() => void gotoMatch(activeMatch + 1)} title="Next (Enter)">↓</button>
+                  <button className={`find-toggle${caseSensitive ? " on" : ""}`} onClick={() => setCaseSensitive((v) => !v)} title="Match case">Aa</button>
+                  <button className={`find-toggle${useRegex ? " on" : ""}`} onClick={() => setUseRegex((v) => !v)} title="Regular expression">.*</button>
+                  {!readonly && (
+                    <button
+                      className={`find-toggle${cmdMode === "replace" ? " on" : ""}`}
+                      onClick={() => setCmdMode((m) => (m === "replace" ? "find" : "replace"))}
+                      title="Toggle replace"
+                    >
+                      ⇄
+                    </button>
+                  )}
+                </>
+              )}
+              {cmdMode === "filter" && (
+                <>
+                  <span className="cmd-count">
+                    {filterMatches.length >= 1000
+                      ? "1000+ (first 1000)"
+                      : `${filterMatches.length} line${filterMatches.length === 1 ? "" : "s"}`}
+                  </span>
+                  <button className={`find-toggle${filterCase ? " on" : ""}`} onClick={() => setFilterCase((v) => !v)} title="Match case">Aa</button>
+                </>
+              )}
+              {cmdMode === "goto" && (
+                <button className="find-btn" onClick={submitGoto} title="Go (Enter)">↵</button>
+              )}
+              <button className="find-btn" onClick={closeCmd} title="Close (Esc)">✕</button>
             </div>
-          )}
+            {cmdMode === "replace" && (
+              <div className="cmd-row">
+                <span className="cmd-chip ghost">With</span>
+                <input
+                  className="cmd-input"
+                  placeholder="Replace"
+                  value={replaceText}
+                  onChange={(e) => setReplaceText(e.target.value)}
+                />
+                <button className="find-btn wide" onClick={() => void doReplaceAll()}>Replace all</button>
+              </div>
+            )}
+            {cmdMode === "command" && (
+              <>
+                <div className="cmd-list">
+                  {paletteFiltered.length ? (
+                    paletteFiltered.map((it, i) => {
+                      const prev = paletteFiltered[i - 1];
+                      const header =
+                        !prev || prev.kind !== it.kind
+                          ? it.kind === "command"
+                            ? "Commands"
+                            : it.kind === "tab"
+                              ? "Open tabs"
+                              : "Files in this folder"
+                          : null;
+                      return (
+                        <div key={`${it.kind}-${it.label}-${i}`}>
+                          {header && <div className="palette-section">{header}</div>}
+                          <div
+                            className={`palette-item${i === paletteIndex ? " on" : ""}`}
+                            onMouseEnter={() => setPaletteIndex(i)}
+                            onMouseDown={(e) => {
+                              e.preventDefault();
+                              setCmdMode(null);
+                              it.run();
+                            }}
+                          >
+                            <span className="pl-label">{it.label}</span>
+                            {it.hint && <span className="pl-hint">{it.hint}</span>}
+                          </div>
+                        </div>
+                      );
+                    })
+                  ) : (
+                    <div className="palette-empty">No files or commands match</div>
+                  )}
+                </div>
+                <div className="palette-foot">↑↓ move · Enter run · Esc close · / find · = filter · : line</div>
+              </>
+            )}
+          </div>
         </div>
       )}
 
@@ -2966,9 +3522,17 @@ function App() {
           </button>
         </div>
       )}
-      {showLive ? (
+      {lensActive && lensBar}
+      {tableView && tableInfo ? (
+      <TableGrid
+        delimiter={tableInfo.delimiter}
+        hasHeader={tableInfo.has_header}
+        columns={tableInfo.columns}
+        rowCount={tableInfo.row_count}
+      />
+      ) : showLive ? (
       <div className={`mdview${editBlock != null ? " editing" : ""}`} ref={mdScrollRef} tabIndex={0}>
-        {blocks.length ? (
+        {blocks.length > 0 && (
           <div
             className="mdview-inner"
             onClick={onPreviewClick}
@@ -2992,15 +3556,77 @@ function App() {
               </div>
             ))}
           </div>
-        ) : (
+        )}
+        {blocks.length === 0 && blocksLoading && (
           <div className="mdview-inner">
-            {blocksLoading ? (
-              <p className="md-empty">Rendering…</p>
-            ) : (
-              <p className="md-empty">This document is empty.</p>
-            )}
+            <p className="md-empty">Rendering…</p>
           </div>
         )}
+        {/* Type-as-you-go: a trailing editor to write the next block, or a click-to-add zone. */}
+        {!blocksLoading &&
+          (editBlock != null && editBlock >= blocks.length ? (
+            <div className="mdview-inner md-append">
+              <div className="md-blockedit">
+                <textarea
+                  ref={editAreaRef}
+                  className="md-blockedit-ta"
+                  defaultValue=""
+                  placeholder="Type Markdown…"
+                  spellCheck={false}
+                  onKeyDown={onBlockEditKey}
+                  onBlur={onBlockEditBlur}
+                  onInput={(e) => autosizeEdit(e.currentTarget)}
+                />
+                {IS_MOBILE && (
+                  <div className="md-blockedit-bar">
+                    <button
+                      type="button"
+                      className="be-btn be-cancel"
+                      onPointerDown={(e) => {
+                        e.preventDefault();
+                        swallowClickRef.current = true;
+                        cancelEdit();
+                      }}
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="button"
+                      className="be-btn be-done"
+                      onPointerDown={(e) => {
+                        e.preventDefault();
+                        swallowClickRef.current = true;
+                        void commitEdit(editAreaRef.current?.value ?? "");
+                      }}
+                    >
+                      Done
+                    </button>
+                    <span className="md-blockedit-hint">
+                      <b>{combo("Enter")}</b> render · <b>Esc</b> cancel
+                    </span>
+                  </div>
+                )}
+              </div>
+            </div>
+          ) : (
+            <div className="mdview-inner md-addzone" onClick={() => beginAppend()}>
+              {blocks.length === 0 ? "Type to start writing…" : "+ Add a block"}
+            </div>
+          ))}
+      </div>
+      ) : lensFiltering || filterCollapse ? (
+      <div className="filter-view lens-list">
+        {renderFilterList((line) => {
+          if (filterCollapse) {
+            // Command-bar Filter: close the bar, then jump to the picked line in the editor.
+            closeCmd();
+            void jumpToLine(line);
+          } else {
+            // Lens: clearing the query remounts the scroller; jump once it's back so it scrolls.
+            setFilterQuery("");
+            setTimeout(() => void jumpToLine(line), 0);
+          }
+        })}
       </div>
       ) : (
       <div
@@ -3078,64 +3704,7 @@ function App() {
         )}
       </div>
       )}
-      {filterOpen && (
-        <div className="filter-view">
-          <div className="filter-bar">
-            <input
-              className="filter-input"
-              autoFocus
-              placeholder="Filter lines by regex (e.g. ERROR|WARN)…"
-              value={filterQuery}
-              onChange={(e) => setFilterQuery(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Escape") {
-                  e.preventDefault();
-                  closeFilter();
-                }
-              }}
-            />
-            <span className="filter-count">
-              {filterMatches.length >= 1000
-                ? "1000+ (first 1000)"
-                : `${filterMatches.length} line${filterMatches.length === 1 ? "" : "s"}`}
-            </span>
-            <button className="find-btn" onClick={closeFilter} title="Close (Esc)">
-              ✕
-            </button>
-          </div>
-          <div className="filter-list">
-            {filterMatches.length ? (
-              filterMatches.map((m) => {
-                const hl = lineHighlight(m.text);
-                return (
-                  <div
-                    key={m.line}
-                    className="filter-row"
-                    style={hl ? { boxShadow: `inset 3px 0 0 ${hl}`, background: `${hl}14` } : undefined}
-                    onClick={() => {
-                      closeFilter();
-                      void jumpToLine(m.line);
-                    }}
-                    title={`Go to line ${m.line + 1}`}
-                  >
-                    <span className="filter-gutter">{m.line + 1}</span>
-                    <span className="filter-text">
-                      {renderLine(m.text.replace(/\r?\n$/, ""), [])}
-                      {m.truncated && <span className="trunc"> ⋯</span>}
-                    </span>
-                  </div>
-                );
-              })
-            ) : (
-              <div className="filter-empty">
-                {filterQuery
-                  ? "No matching lines"
-                  : "Type a regex to collapse the document to just the matching lines."}
-              </div>
-            )}
-          </div>
-        </div>
-      )}
+      {lensActive && meta?.path && liveBadge}
       </div>
 
       <footer className="statusbar">
@@ -3199,8 +3768,7 @@ function App() {
           onClick={() => {
             if (leftPanel === "outline") setLeftPanel(null);
             else {
-              closeFind();
-              closeFilter();
+              closeCmd();
               setLeftPanel("outline");
             }
           }}
@@ -3213,58 +3781,6 @@ function App() {
         <div className="gut-sp" />
         <div className="gut-tag">OUTLINE</div>
       </aside>
-      {paletteOpen && (
-        <div className="palette-overlay" onMouseDown={() => setPaletteOpen(false)}>
-          <div className="palette-modal" onMouseDown={(e) => e.stopPropagation()}>
-            <input
-              className="palette-input"
-              autoFocus
-              placeholder="Search a file to open, or run a command (try 'Open Folder' or 'Save')"
-              value={paletteQuery}
-              onChange={(e) => {
-                setPaletteQuery(e.target.value);
-                setPaletteIndex(0);
-              }}
-              onKeyDown={onPaletteKey}
-            />
-            <div className="palette-list">
-              {paletteFiltered.length ? (
-                paletteFiltered.map((it, i) => {
-                  const prev = paletteFiltered[i - 1];
-                  const header =
-                    !prev || prev.kind !== it.kind
-                      ? it.kind === "command"
-                        ? "Commands"
-                        : it.kind === "tab"
-                          ? "Open tabs"
-                          : "Files in this folder"
-                      : null;
-                  return (
-                    <div key={`${it.kind}-${it.label}-${i}`}>
-                      {header && <div className="palette-section">{header}</div>}
-                      <div
-                        className={`palette-item${i === paletteIndex ? " on" : ""}`}
-                        onMouseEnter={() => setPaletteIndex(i)}
-                        onMouseDown={(e) => {
-                          e.preventDefault();
-                          it.run();
-                          setPaletteOpen(false);
-                        }}
-                      >
-                        <span className="pl-label">{it.label}</span>
-                        {it.hint && <span className="pl-hint">{it.hint}</span>}
-                      </div>
-                    </div>
-                  );
-                })
-              ) : (
-                <div className="palette-empty">No files or commands match</div>
-              )}
-            </div>
-            <div className="palette-foot">↑↓ move · Enter run · Esc close</div>
-          </div>
-        </div>
-      )}
       {hlEditorOpen && (
         <div className="palette-overlay" onMouseDown={() => closeHlEditor()}>
           <div className="palette-modal hl-modal" onMouseDown={(e) => e.stopPropagation()}>
@@ -3316,6 +3832,23 @@ function App() {
               <span className="spacer" />
               <button className="find-btn" onClick={() => closeHlEditor()}>
                 Done
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {newFileOpen && (
+        <div className="palette-overlay" onMouseDown={() => setNewFileOpen(false)}>
+          <div className="palette-modal newfile-modal" onMouseDown={(e) => e.stopPropagation()}>
+            <div className="hl-head">New file</div>
+            <div className="newfile-body">
+              <button className="newfile-opt" onClick={() => void createNewDoc("md")} autoFocus>
+                <span className="nf-title">Markdown</span>
+                <span className="nf-sub">Live preview — renders a block at a time as you type (.md)</span>
+              </button>
+              <button className="newfile-opt" onClick={() => void createNewDoc("txt")}>
+                <span className="nf-title">Plain text</span>
+                <span className="nf-sub">A plain editor, no rendering (.txt)</span>
               </button>
             </div>
           </div>

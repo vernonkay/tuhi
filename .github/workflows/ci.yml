@@ -7,6 +7,7 @@ on:
     branches: [main]
   push:
     branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -45,6 +46,51 @@ jobs:
       - name: Tests
         if: success() || failure()
         run: just test
+
+  # End-to-end tests drive the REAL built binary through WebDriver (tauri-driver), so they
+  # exercise the native webview (WebKitGTK), the IPC bridge and the Rust backend — the layers
+  # the jsdom component tests (just test) deliberately mock. This is the machine-verified UI gate.
+  #
+  # Linux only, for now. Windows (WebView2) E2E fails at WebDriver session creation with
+  # tauri-driver ("DevToolsActivePort file doesn't exist"); the fix is the embedded-driver
+  # plugin (tauri-plugin-wdio-webdriver), which must be wired so its capability permission
+  # cannot reach the release build. Tracked in issue #49. macOS needs a
+  # third-party driver fork and is likewise deferred. WebView2/WKWebView stay covered by the
+  # `check` matrix (which builds on all three OSes) plus manual review at the release candidate.
+  e2e:
+    name: e2e (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Install Linux Tauri + WebDriver deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev webkit2gtk-driver xvfb
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - name: Install tauri-driver
+        run: cargo install tauri-driver --locked
+      - run: cd app && npm ci
+      - name: Build app (debug, embedded assets, no installer bundle)
+        shell: bash
+        # Use the Tauri CLI, not a bare `cargo build`: the CLI enables the production asset
+        # protocol so the webview loads the EMBEDDED front-end. A plain `cargo build` binary
+        # runs in dev mode and tries to reach the Vite dev server (localhost:1420), which isn't
+        # running in CI — the window comes up blank and WebDriver sees no app. --no-bundle skips
+        # the slow installer bundling; --debug keeps the compile cheap (no release LTO).
+        run: cd app && npm run tauri -- build --debug --no-bundle
+      - name: E2E (virtual display)
+        env:
+          TUHI_E2E_BINARY: ${{ github.workspace }}/app/src-tauri/target/debug/tuhi
+        run: xvfb-run --auto-servernum --server-args="-screen 0 1280x1024x24" bash -c "cd app && npm run e2e"
 
   attribution:
     name: attribution (no AI trailers)

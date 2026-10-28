@@ -6,13 +6,43 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-10-29
+
+"tuhi opens anything." This release leans into the large-file engine: open and wrangle data —
+logs, CSVs, huge files — not just Markdown notes.
+
 ### Added
 
-- **New file** (<kbd>Ctrl/Cmd+N</kbd>): opens a fresh, empty, untitled document in its own
-  tab; the first save prompts for a location (Save As). Reachable from the rail, the command
-  palette and the welcome view.
-- A visible **Format JSON** control in the rail — the one-key JSON pretty-print was
-  previously only in the command palette, so it was easy to miss.
+- **Tabular view** for delimited files: open a CSV/TSV/JSON-lines file as a real grid and scroll
+  it, even at multiple GB, as fast as plain text (it rides the same large-file engine, so nothing
+  is loaded into memory to view it). **Sort** by any column (click the header; numeric columns
+  sort numerically, text case-insensitively), **jump to a column** for wide tables, with a sticky
+  header row and sticky row numbers. `.csv`/`.tsv`/`.tab` open as a grid automatically once the
+  shape is confirmed; **View as table** / **View as text** toggles it.
+- **Data mode** for logs and large files: a lens over the editor with a sticky **filter strip**
+  (collapse the view to matching lines), a **LIVE** tail badge that follows a growing file, and
+  gutter colour stripes on highlighted lines — plus a thin **Data** panel for managing highlight
+  rules and a stats block (lines, matches, size, encoding). Auto-engages when you open a log or a
+  file on the large-file engine.
+- **Command bar** (<kbd>Ctrl/Cmd+P</kbd>): Find, Filter, Commands, Go-to-line and Replace are now
+  one top-centre input with a mode chip and a single keyboard model. Typing `/`, `=` or `:` as the
+  first character jumps straight to Find, Filter or Go-to-line. The left rail is reduced to
+  Files · Search · Data · Settings.
+- **New file** (<kbd>Ctrl/Cmd+N</kbd>): asks for a type first (Markdown or plain text), then
+  opens a fresh untitled document in its own tab; the first save prompts for a location
+  (Save As, defaulting to `.md` for Markdown). Reachable from <kbd>Ctrl/Cmd+N</kbd>, the
+  command palette and the welcome view.
+- **Type-as-you-go Markdown.** A new Markdown document opens straight into the live preview
+  and renders a block at a time as you write: type a block and end it with a **blank line**
+  (Markdown's own block rule) — or <kbd>Ctrl/Cmd+Enter</kbd> — and it renders, dropping you
+  into the next. Single <kbd>Enter</kbd> still adds a line within a block (lists, code). Any
+  `.md` also gets a trailing "add a block" zone to append at the end.
+- **Save As offers a file-type list** (Markdown, Plain text, JSON, HTML, CSS, JS/TS, YAML,
+  TOML, XML, CSV, Log, …) so a new document saves with the right extension instead of only
+  "All files"; the new-file type is the default.
+- A **Format JSON** control that appears **only when the document is JSON** (by extension or
+  content) — the one-key pretty-print was previously only in the command palette and easy to
+  miss, but it should never be offered on a file it can't apply to.
 
 ### Changed
 
@@ -20,6 +50,9 @@ follow [Semantic Versioning](https://semver.org/).
   outline panels now take their own column and the editor resizes to fit, so text is no
   longer hidden underneath a panel. On narrow or mobile widths they still float as an
   overlay. This also moves the outline panel out from under the window buttons.
+- **Docking holds the Markdown reading column in place.** When a panel is pinned, it first
+  consumes the empty margin beside the centred reading column, so the text keeps its
+  on-screen position and only shifts once the panel would actually reach it.
 
 ### Fixed
 

@@ -565,6 +565,62 @@ html, body, #root {
 .find-toggle:hover { border-color: var(--coral); }
 .find-toggle.on { background: var(--coral); color: #fff; border-color: var(--coral); }
 
+/* Command bar (#47): one top-centre input for Find · Replace · Filter · Go to line · Commands.
+   Reuses .palette-* for the command dropdown and .find-btn/.find-toggle for the mode controls. */
+.cmdbar-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.35);
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  padding-top: 12vh;
+  z-index: 50;
+}
+.cmdbar {
+  width: min(620px, 92vw);
+  max-height: 70vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 24px 70px -20px rgba(0, 0, 0, 0.6);
+  overflow: hidden;
+}
+.cmd-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+}
+.cmd-row + .cmd-row { border-top: 1px solid var(--border); }
+.cmd-chip {
+  flex: 0 0 auto;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #fff;
+  background: var(--coral);
+  border-radius: 6px;
+  padding: 4px 8px;
+}
+.cmd-chip.ghost { color: var(--slate); background: var(--coral-soft); }
+.cmd-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  font: inherit;
+  font-size: 15px;
+  padding: 4px 2px;
+  border: none;
+  background: transparent;
+  color: var(--ink);
+}
+.cmd-input:focus { outline: none; }
+.cmd-count { flex: 0 0 auto; font-size: 12px; color: var(--slate); font-variant-numeric: tabular-nums; }
+.cmd-list { overflow: auto; padding: 6px; border-top: 1px solid var(--border); }
+
 /* Search-match highlight (behind text; the active match shows as the selection). */
 .find-match {
   position: absolute;
@@ -845,11 +901,45 @@ html, body, #root {
   max-width: 760px; margin: 0 auto; position: relative;
   font-family: var(--ui-font); color: var(--ink); font-size: 15px; line-height: 1.65;
 }
+/* Eat the margin, hold the text: when a panel is docked (desktop only), the centred reading
+   column keeps its on-screen position by consuming the empty margin on the panel's side,
+   and only shifts once the panel would actually reach the text. The arithmetic: the column's
+   natural side margin is (100% - 760px)/2 within the editor; subtract half the panel width so
+   the column's screen edge stays put, clamped at 0 so it never slides under the panel.
+   --panel-w is set on .body (App.tsx) to the live panel width. */
+@media (min-width: 601px) {
+  .shell:not(.mobile) .body:has(.over-l) .mdview-inner {
+    margin-left: max(0px, calc((100% - 760px) / 2 - var(--panel-w, 0px) / 2));
+    margin-right: auto;
+  }
+  .shell:not(.mobile) .body:has(.over-r) .mdview-inner {
+    margin-right: max(0px, calc((100% - 760px) / 2 - var(--panel-w, 0px) / 2));
+    margin-left: auto;
+  }
+}
 /* One virtualized row per block. `flow-root` contains the block's vertical margins so the
    measured row height includes its spacing (no overlap/gaps); horizontal padding sets the
    text column. Vertical breathing room is the virtualizer's paddingStart/paddingEnd. */
 .md-vrow { display: flow-root; padding: 0 40px; }
 .md-empty { color: var(--slate); font-style: italic; padding: 32px 40px; }
+/* Type-as-you-go: the trailing editor and the click-to-add zone below the rendered blocks. */
+.md-append { padding-top: 4px; }
+.md-addzone {
+  min-height: 38vh; padding: 14px 40px; cursor: text;
+  color: var(--slate); font-size: 13px; opacity: 0.55;
+}
+.md-addzone:hover { opacity: 0.9; }
+/* New-file type picker (Ctrl+N). */
+.newfile-modal { max-width: 440px; }
+.newfile-body { display: flex; flex-direction: column; gap: 10px; padding: 6px 2px 2px; }
+.newfile-opt {
+  display: flex; flex-direction: column; gap: 3px; text-align: left; font: inherit;
+  padding: 12px 14px; border-radius: 10px; border: 1px solid var(--border);
+  background: var(--panel); color: var(--ink); cursor: pointer;
+}
+.newfile-opt:hover, .newfile-opt:focus-visible { border-color: var(--coral); background: var(--coral-soft); outline: none; }
+.nf-title { font-weight: 600; font-size: 14px; }
+.nf-sub { font-size: 12px; color: var(--slate); }
 .md-h {
   font-family: var(--display-font); font-weight: 700; line-height: 1.2;
   letter-spacing: -0.015em; margin: 1.4em 0 0.5em; color: var(--ink); text-wrap: balance;
@@ -1112,6 +1202,15 @@ button,
   color: var(--ink); background: var(--panel);
   border: 1px solid var(--coral); border-radius: 8px; padding: 10px 12px; outline: none;
 }
+/* Seamless live preview (desktop): the active block reads as inline source — a soft tint and a
+   coral edge bar mark the line you are on (matching the hover affordance), the text stays aligned
+   with the rendered column, and there is no boxed editor. Touch builds keep the box + Done/Cancel
+   bar above, since they have no hardware arrows to cross block boundaries with. */
+.shell:not(.mobile) .md-blockedit-ta {
+  width: auto; margin: 0 -6px; padding: 3px 6px;
+  border: none; border-radius: 6px;
+  background: var(--coral-soft); box-shadow: inset 3px 0 0 var(--coral);
+}
 .md-blockedit-hint {
   margin-top: 4px; font-family: var(--ui-font); font-size: 11px; color: var(--slate);
 }
@@ -1138,3 +1237,232 @@ button,
 .recovery-btn.ghost { background: transparent; color: var(--slate); border-color: var(--border); }
 .recovery-btn:hover { filter: brightness(1.05); }
 .recovery-btn.ghost:hover { color: var(--ink); border-color: var(--slate); }
+
+/* ---- Data mode: the "lens" (filter bar + LIVE badge, gutter stripes reuse .line) and the
+   thin Data panel (highlight rules + stats). Everything uses the chrome tokens, so it tracks
+   the light/dark theme without extra rules. ---- */
+.lensbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel);
+  flex: 0 0 auto;
+}
+.lens-tag {
+  font-family: var(--mono-font);
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  color: var(--coral);
+  border: 1px solid var(--coral);
+  border-radius: 5px;
+  padding: 2px 7px;
+  flex: 0 0 auto;
+}
+.lens-input {
+  flex: 1;
+  min-width: 0;
+  font: inherit;
+  font-size: 13px;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--paper);
+  color: var(--ink);
+}
+.lens-input:focus { outline: none; border-color: var(--coral); }
+.lens-btn {
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  padding: 4px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--paper);
+  color: var(--slate);
+  flex: 0 0 auto;
+}
+.lens-btn:hover { border-color: var(--coral); color: var(--coral); }
+.lens-btn.on { background: var(--coral-soft); border-color: var(--coral); color: var(--coral); }
+.lens-btn.tail.on { background: rgba(47, 143, 78, 0.14); border-color: #2f8f4e; color: #2f8f4e; }
+.lens-count { font-size: 12px; color: var(--slate); flex: 0 0 auto; margin-left: auto; }
+
+/* The lens collapse-list flows inline below the bar instead of overlaying (unlike the
+   classic filter overlay, which stays absolute over a still-mounted scroller). */
+.filter-view.lens-list {
+  position: static;
+  inset: auto;
+  z-index: auto;
+  flex: 1;
+  min-height: 0;
+}
+
+/* Floating LIVE / Tail badge, bottom-right of the editor. */
+.live-badge {
+  position: absolute;
+  right: 16px;
+  bottom: 14px;
+  z-index: 6;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-family: var(--mono-font);
+  font-size: 11px;
+  cursor: pointer;
+  padding: 4px 11px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--paper);
+  color: var(--slate);
+  box-shadow: 0 4px 14px rgba(20, 22, 28, 0.14);
+}
+.live-badge:hover { border-color: var(--coral); color: var(--coral); }
+.live-badge .lb-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--slate); }
+.live-badge.on { color: #2f8f4e; border-color: rgba(47, 143, 78, 0.5); }
+.live-badge.on .lb-dot { background: #2f8f4e; animation: tuhi-pulse 1.1s infinite; }
+@keyframes tuhi-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.25; } }
+
+/* Data panel (reuses .over / .op-head chrome from the outline panel). */
+.dp-body { flex: 1; overflow: auto; padding: 8px 10px; display: flex; flex-direction: column; gap: 18px; }
+.dp-sec { display: flex; flex-direction: column; gap: 7px; }
+.dp-label {
+  font-family: var(--mono-font);
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--slate);
+}
+.dp-empty { color: var(--slate); font-size: 12px; margin: 0; }
+.dp-add {
+  align-self: flex-start;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  padding: 4px 10px;
+  border-radius: 6px;
+  border: 1px dashed var(--coral);
+  background: transparent;
+  color: var(--coral);
+}
+.dp-add:hover { background: var(--coral-soft); }
+.dp-check { display: flex; align-items: center; gap: 7px; font-size: 13px; color: var(--ink); cursor: pointer; }
+.dp-stat { display: flex; justify-content: space-between; font-size: 12px; color: var(--slate); }
+.dp-stat b { color: var(--ink); font-weight: 600; }
+
+/* Tabular view (feature #1): a virtualized grid for delimited files. Rows are absolutely
+   positioned by the row virtualizer; the header row and the row-number column are sticky, so
+   both stay put while a multi-GB CSV scrolls in either axis. */
+.table-grid {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  outline: none;
+  background: var(--paper);
+  color: var(--ink);
+  font: 13px/1.5 var(--mono-font);
+}
+.tg-content { position: relative; }
+.tg-head {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  display: flex;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+  font-weight: 600;
+}
+.tg-list { position: relative; }
+.tg-row {
+  position: absolute;
+  top: 0;
+  left: 0;
+  display: flex;
+  border-bottom: 1px solid var(--border);
+}
+.tg-hcell,
+.tg-cell,
+.tg-num {
+  box-sizing: border-box;
+  padding: 0 10px;
+  line-height: 26px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  border-right: 1px solid var(--border);
+}
+.tg-num {
+  position: sticky;
+  left: 0;
+  z-index: 2;
+  background: var(--panel);
+  color: var(--slate);
+  text-align: right;
+  font-size: 12px;
+}
+.tg-head .tg-num { z-index: 4; } /* the top-left corner sits above both sticky axes */
+.tg-row:hover .tg-cell,
+.tg-row:hover .tg-num { background: var(--coral-soft); }
+/* Header columns are buttons (click to sort): reset the button chrome back to a header cell. */
+.tg-sortable {
+  border: none;
+  border-right: 1px solid var(--border);
+  background: var(--panel);
+  color: inherit;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+  text-align: left;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.tg-sortable:hover { background: var(--coral-soft); }
+.tg-sortable.sorted { color: var(--coral); }
+.tg-hlabel { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tg-arrow { margin-left: auto; font-size: 10px; color: var(--coral); }
+.tg-error {
+  position: sticky;
+  left: 0;
+  padding: 6px 10px;
+  font: 12px/1.4 var(--ui-font);
+  color: var(--coral);
+  background: var(--coral-soft);
+  border-bottom: 1px solid var(--border);
+}
+/* The tabular view wraps a fixed toolbar (jump-to-column + a row/col/sort summary) above the
+   scrolling grid. */
+.table-view {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.tg-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 6px 12px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+  font: 12px/1.4 var(--ui-font);
+  color: var(--slate);
+}
+.tg-jump {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--ink);
+}
+.tg-jump select {
+  font: inherit;
+  background: var(--paper);
+  color: var(--ink);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 2px 6px;
+  max-width: 220px;
+}
+.tg-meta {
+  margin-left: auto;
+}

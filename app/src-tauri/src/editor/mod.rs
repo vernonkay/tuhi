@@ -29,6 +29,7 @@ mod markdown;
 mod mmapbuf;
 mod recovery;
 mod search;
+mod table;
 use encoding::Encoding;
 use error::EditorError;
 use highlight::{HIGHLIGHT_MAX_BYTES, Span};
@@ -246,6 +247,22 @@ pub trait Buffer: Send {
             hits: Vec::new(),
             truncated: false,
         })
+    }
+    /// One window of rows for the tabular view (feature #1): the lines `[start, start + count)`,
+    /// each split into cells on `delimiter`. Rides on `viewport`, so the engine's random-row
+    /// access and per-line length caps apply and nothing extra is indexed — a multi-GB CSV
+    /// scrolls as a grid the same way it scrolls as text. The default suits every engine.
+    fn table_rows(
+        &self,
+        start: usize,
+        count: usize,
+        delimiter: char,
+    ) -> Result<Vec<Vec<String>>, EditorError> {
+        let lines = self.viewport(start, count)?;
+        Ok(lines
+            .iter()
+            .map(|l| table::split_cells(&l.text, delimiter))
+            .collect())
     }
 }
 
@@ -1713,6 +1730,19 @@ pub fn replace_block(
         .replace_line_range(start_line, end_line, &text)
 }
 
+/// Append `text` as a new block at the end of the active document (the type-as-you-go
+/// Markdown flow, for a new or continuing document). A blank line separates it from any
+/// existing content so it parses as its own block. Returns the new meta so the front end
+/// re-parses the live preview.
+#[tauri::command]
+pub fn append_block(text: String, state: State<EditorState>) -> Result<DocumentMeta, EditorError> {
+    let mut reg = state.0.lock().map_err(|_| EditorError::LockPoisoned)?;
+    let b = reg.active_buffer_mut()?;
+    let end = b.meta().char_count;
+    let payload = if end > 0 { format!("\n\n{text}") } else { text };
+    b.insert(end, &payload)
+}
+
 #[derive(Serialize)]
 pub struct ReplaceResult {
     pub meta: DocumentMeta,
@@ -1788,6 +1818,141 @@ pub fn filter_lines(
         .map_err(|_| EditorError::LockPoisoned)?
         .active_buffer()?
         .filter(&query, use_regex, case_sensitive)
+}
+
+/// What the active document looks like as a table, for the tabular view (feature #1): the
+/// delimiter, the column count, whether the first row is a header, and the total row count. The
+/// UI calls this on entering the view. It samples the first lines via the viewport, so it stays
+/// cheap on a huge file. `tabular` is false (and the rest zero/empty) when it doesn't parse as a
+/// table, so the UI can fall back to text.
+#[derive(Serialize)]
+pub struct TableSniff {
+    pub tabular: bool,
+    /// The delimiter as a one-character string (",", "\t", ";", "|"); empty when not tabular.
+    pub delimiter: String,
+    pub columns: usize,
+    pub has_header: bool,
+    /// Total lines — the grid's row space; the UI offsets by one when `has_header`.
+    pub row_count: usize,
+}
+
+/// Lines sampled when sniffing the table shape.
+const TABLE_SNIFF_SAMPLE: usize = 50;
+
+#[tauri::command]
+pub fn table_sniff(state: State<EditorState>) -> Result<TableSniff, EditorError> {
+    let reg = state.0.lock().map_err(|_| EditorError::LockPoisoned)?;
+    let b = reg.active_buffer()?;
+    let sample: Vec<String> = b
+        .viewport(0, TABLE_SNIFF_SAMPLE)?
+        .into_iter()
+        .map(|l| l.text)
+        .collect();
+    let s = table::sniff(&sample);
+    let row_count = b.meta().line_count;
+    Ok(TableSniff {
+        tabular: s.delimiter.is_some(),
+        delimiter: s.delimiter.map(|c| c.to_string()).unwrap_or_default(),
+        columns: s.columns,
+        has_header: s.has_header,
+        row_count,
+    })
+}
+
+/// One window of table rows `[start, start + count)`, each line split into cells on `delimiter`
+/// (a one-character string). Backs the virtualized grid: the UI fetches the visible row window as
+/// it scrolls, exactly like the text viewport.
+#[tauri::command]
+pub fn table_window(
+    start: usize,
+    count: usize,
+    delimiter: String,
+    state: State<EditorState>,
+) -> Result<Vec<Vec<String>>, EditorError> {
+    let delim = delimiter
+        .chars()
+        .next()
+        .ok_or_else(|| EditorError::Other("table_window: empty delimiter".into()))?;
+    state
+        .0
+        .lock()
+        .map_err(|_| EditorError::LockPoisoned)?
+        .active_buffer()?
+        .table_rows(start, count, delim)
+}
+
+/// A stable sort order for the tabular view: the data-row indices (0-based, the header excluded
+/// when `has_header`) in display order for `column`, numeric-aware. The UI maps each visual row to
+/// its source line through this order and fetches those rows with `table_rows_at`. Refuses files
+/// over `table::MAX_SORT_ROWS` rows (the sort is in-memory) with an error the UI surfaces. Reads
+/// the column's cells in batches via the engine viewport, so it works on the large-file engine too.
+#[tauri::command]
+pub fn table_sort(
+    column: usize,
+    delimiter: String,
+    has_header: bool,
+    descending: bool,
+    state: State<EditorState>,
+) -> Result<Vec<usize>, EditorError> {
+    let delim = delimiter
+        .chars()
+        .next()
+        .ok_or_else(|| EditorError::Other("table_sort: empty delimiter".into()))?;
+    let reg = state.0.lock().map_err(|_| EditorError::LockPoisoned)?;
+    let b = reg.active_buffer()?;
+    let total = b.meta().line_count;
+    let offset = usize::from(has_header);
+    let data_rows = total.saturating_sub(offset);
+    if data_rows > table::MAX_SORT_ROWS {
+        return Err(EditorError::Other(format!(
+            "too large to sort ({data_rows} rows; limit {})",
+            table::MAX_SORT_ROWS
+        )));
+    }
+    // Gather the column's cell for each data row, in file order, reading in batches.
+    let mut col_keys: Vec<String> = Vec::with_capacity(data_rows);
+    const BATCH: usize = 4096;
+    let mut start = offset;
+    while start < total {
+        let lines = b.viewport(start, BATCH)?;
+        if lines.is_empty() {
+            break;
+        }
+        for l in &lines {
+            let cells = table::split_cells(&l.text, delim);
+            col_keys.push(cells.get(column).cloned().unwrap_or_default());
+        }
+        start += lines.len();
+    }
+    Ok(table::sort_order(&col_keys, descending))
+}
+
+/// Fetch specific table rows by their source line index, each split into cells on `delimiter`.
+/// Used by the grid while a sort is active, where the visible rows map to scattered lines rather
+/// than a contiguous window.
+#[tauri::command]
+pub fn table_rows_at(
+    lines: Vec<usize>,
+    delimiter: String,
+    state: State<EditorState>,
+) -> Result<Vec<Vec<String>>, EditorError> {
+    let delim = delimiter
+        .chars()
+        .next()
+        .ok_or_else(|| EditorError::Other("table_rows_at: empty delimiter".into()))?;
+    let reg = state.0.lock().map_err(|_| EditorError::LockPoisoned)?;
+    let b = reg.active_buffer()?;
+    let mut out = Vec::with_capacity(lines.len());
+    for &ln in &lines {
+        let text = b
+            .viewport(ln, 1)?
+            .into_iter()
+            .next()
+            .map(|l| l.text)
+            .unwrap_or_default();
+        out.push(table::split_cells(&text, delim));
+    }
+    Ok(out)
 }
 
 /// List one directory's immediate children (the file tree expands lazily per folder).
